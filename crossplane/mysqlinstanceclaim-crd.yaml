@@ -1,0 +1,51 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: mysqlinstances.db.platform.example.org
+spec:
+  group: db.platform.example.org
+  names:
+    kind: MySQLInstance
+    plural: mysqlinstances
+  claimNames:
+    kind: MySQLInstanceClaim
+    plural: mysqlinstanceclaims
+  defaultCompositionRef:
+    name: mysql-aws
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                parameters:
+                  type: object
+                  properties:
+                    cell: { type: string }
+                    environment: { type: string }
+                    tier: { type: string }
+                    provider: { type: string }
+                    region: { type: string }
+                    size: { type: string }
+                    storageGB: { type: integer }
+                    ha: { type: boolean }
+                    network:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                  required:
+                    - cell
+                    - environment
+                    - tier
+                    - provider
+                    - region
+                    - size
+                    - storageGB
+                    - ha
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true

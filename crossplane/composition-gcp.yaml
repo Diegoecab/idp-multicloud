@@ -1,0 +1,31 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: mysql-gcp
+  labels:
+    db.platform.example.org/provider: gcp
+    db.platform.example.org/class: mysql
+spec:
+  compositeTypeRef:
+    apiVersion: db.platform.example.org/v1alpha1
+    kind: MySQLInstance
+  resources:
+    - name: managed-mysql
+      # Replace this placeholder with your provider-specific Cloud SQL resource.
+      base:
+        apiVersion: kubernetes.crossplane.io/v1alpha2
+        kind: Object
+        spec:
+          forProvider:
+            manifest:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: placeholder-gcp-mysql
+              data:
+                note: "Replace with provider-gcp Cloud SQL resource"
+      patches:
+        - fromFieldPath: spec.parameters.region
+          toFieldPath: spec.forProvider.manifest.data.region
+        - fromFieldPath: spec.parameters.provider
+          toFieldPath: spec.forProvider.manifest.data.provider

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IDP Multicloud Control Plane</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 2rem; max-width: 1000px; }
+    form { border: 1px solid #ddd; padding: 1rem; margin-bottom: 1.5rem; }
+    .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: .75rem; }
+    label { display:block; font-weight: 600; }
+    input, select { width: 100%; padding: .4rem; }
+    pre { background: #111; color:#e8e8e8; padding:1rem; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h1>IDP Multicloud Control Plane</h1>
+
+  <form id="createForm">
+    <h2>Create MySQL Claim</h2>
+    <div class="grid">
+      <div><label>Namespace <input name="namespace" value="default" required /></label></div>
+      <div><label>Name <input name="name" value="payments-db" required /></label></div>
+      <div><label>Cell <input name="cell" value="payments" required /></label></div>
+      <div><label>Tier
+        <select name="tier"><option>C0</option><option selected>C1</option><option>C2</option></select>
+      </label></div>
+      <div><label>Environment
+        <select name="environment"><option>dev</option><option>staging</option><option selected>prod</option></select>
+      </label></div>
+      <div><label>Size
+        <select name="size"><option>small</option><option selected>medium</option><option>large</option></select>
+      </label></div>
+      <div><label>Storage (GB) <input name="storageGB" type="number" value="50" min="10" /></label></div>
+      <div><label>HA <input name="ha" type="checkbox" checked /></label></div>
+    </div>
+    <button type="submit">Create</button>
+  </form>
+
+  <form id="statusForm">
+    <h2>Query MySQL Claim Status</h2>
+    <div class="grid">
+      <div><label>Namespace <input name="namespace" value="default" required /></label></div>
+      <div><label>Name <input name="name" value="payments-db" required /></label></div>
+    </div>
+    <button type="submit">Get Status</button>
+  </form>
+
+  <h2>Response</h2>
+  <pre id="output">Ready.</pre>
+  <script src="/web/app.js"></script>
+</body>
+</html>
