@@ -1,85 +1,41 @@
-# Internal Development Platform
-
-## Project Overview
-The Internal Development Platform (IDP) provides a streamlined environment for software development, enhancing productivity by integrating various tools, processes, and practices tailored for internal projects.
-
-## Features
-- User-friendly interface for managing development workflows.
-- Integration with CI/CD pipelines.
-- Support for multiple programming languages and frameworks.
-- Real-time monitoring and logging of applications.
-- Multi-cloud deployment capabilities.
-- Automated infrastructure provisioning.
+# IDP Multicloud Control Plane Documentation
 
 ## Architecture
-The IDP is built upon a microservices architecture that allows for scalability and flexibility. Components communicate through RESTful APIs, ensuring modularity and ease of integration with other systems.
+The IDP Multicloud Control Plane provides a comprehensive architecture that allows for seamless integration and management of resources across multiple cloud platforms. 
 
-## Directory Structure
-```
-/idp-multicloud
-    ├── /src              # Source code
-    ├── /docs             # Documentation
-    ├── /tests            # Unit and Integration tests
-    ├── /scripts          # Automation scripts
-    ├── /config           # Configuration files
-    └── /deployment       # Deployment manifests
-```
+## Cells
+The system is designed around the concept of ‘cells’, which are isolated environments within the control plane that enable users to manage their cloud resources independently. Each cell can be configured with different policies and access controls based on organizational needs.
 
-## Prerequisites
-- Node.js (v14 or higher)
-- Docker
-- Kubernetes
-- Git
-- Cloud CLI tools (AWS, Azure, GCP)
+## Criticality Framework
+The criticality framework assesses the importance of applications and resources, which helps in prioritizing management efforts and ensuring that critical applications receive the necessary resources and attention.
 
-## Installation
+## API Endpoints
+The IDP Multicloud Control Plane exposes various API endpoints for managing resources. Common endpoints include:
+- **/api/v1/resources**: For resource management operations.
+- **/api/v1/status**: To check the health of the control plane.
+- **/api/v1/configurations**: For managing configurations across different clouds.
+
+## Setup Instructions
 1. Clone the repository:
    ```bash
    git clone https://github.com/Diegoecab/idp-multicloud.git
    ```
-2. Navigate into the project directory:
+2. Change into the project directory:
    ```bash
    cd idp-multicloud
    ```
-3. Install dependencies:
+3. Install the required dependencies:
    ```bash
    npm install
    ```
-4. Configure environment variables:
+4. Configure your environment variables in a `.env` file based on your cloud provider credentials.
+5. Start the control plane:
    ```bash
-   cp .env.example .env
+   npm start
    ```
+6. Access the control plane dashboard via your browser at `http://localhost:3000`.
 
-## Usage
-To start the development server, run:
-```bash
-npm start
-```
+Make sure to follow the guidelines for proper configuration to ensure optimal performance and security of the control plane.
 
-For production deployment:
-```bash
-npm run build
-npm run deploy
-```
-
-## API Documentation
-API documentation is available in the `/docs/api.md` file.
-
-## Contributing Guidelines
-1. Fork the repository.
-2. Create a new branch for your feature or bug fix:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-3. Commit your changes with clear messages:
-   ```bash
-   git commit -m "Add your feature description"
-   ```
-4. Push to your branch:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-5. Submit a pull request detailing your changes.
-
-## License
-This project is licensed under the MIT License. See the LICENSE file for details.
+## Conclusion
+This documentation serves as a guide for understanding and utilizing the IDP Multicloud Control Plane effectively. For further assistance or detailed inquiries, please refer to the support section or contact development teams.
