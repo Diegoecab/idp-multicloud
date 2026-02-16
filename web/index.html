@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IDP Multicloud — MySQL Provisioning</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: #0f172a; color: #e2e8f0;
+      padding: 2rem; line-height: 1.6;
+    }
+    h1 { color: #38bdf8; margin-bottom: 0.5rem; }
+    h2 { color: #94a3b8; font-size: 1rem; margin-bottom: 1.5rem; font-weight: 400; }
+    h3 { color: #38bdf8; margin-bottom: 1rem; font-size: 1.1rem; }
+    .container { max-width: 900px; margin: 0 auto; }
+    .panel {
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;
+    }
+    label { display: block; margin-bottom: 0.25rem; color: #94a3b8; font-size: 0.875rem; }
+    input, select {
+      width: 100%; padding: 0.5rem 0.75rem;
+      background: #0f172a; border: 1px solid #475569;
+      border-radius: 4px; color: #e2e8f0; font-size: 0.9rem;
+      margin-bottom: 0.75rem;
+    }
+    input:focus, select:focus { outline: none; border-color: #38bdf8; }
+    .row { display: flex; gap: 1rem; }
+    .row > div { flex: 1; }
+    .checkbox-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .checkbox-row input { width: auto; margin: 0; }
+    button {
+      background: #0284c7; color: #fff; border: none;
+      padding: 0.6rem 1.5rem; border-radius: 4px;
+      cursor: pointer; font-size: 0.9rem; font-weight: 500;
+    }
+    button:hover { background: #0369a1; }
+    button:disabled { background: #475569; cursor: not-allowed; }
+    pre {
+      background: #0f172a; border: 1px solid #334155;
+      border-radius: 4px; padding: 1rem; margin-top: 1rem;
+      overflow-x: auto; font-size: 0.8rem; max-height: 500px;
+      overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+    }
+    .status-ok { color: #4ade80; }
+    .status-err { color: #f87171; }
+    .info { color: #94a3b8; font-size: 0.8rem; margin-top: 0.5rem; }
+    hr { border: none; border-top: 1px solid #334155; margin: 1.5rem 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>IDP Multicloud</h1>
+    <h2>Cell-based MySQL Provisioning Control Plane</h2>
+
+    <!-- Create MySQL Instance -->
+    <div class="panel">
+      <h3>Create MySQL Instance</h3>
+      <form id="createForm">
+        <div class="row">
+          <div>
+            <label for="name">Name</label>
+            <input type="text" id="name" placeholder="my-app-db" required>
+          </div>
+          <div>
+            <label for="namespace">Namespace</label>
+            <input type="text" id="namespace" value="default">
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="cell">Cell</label>
+            <input type="text" id="cell" placeholder="cell-us-east" required>
+          </div>
+          <div>
+            <label for="tier">Tier</label>
+            <select id="tier">
+              <option value="low">low (strictest SLA)</option>
+              <option value="medium" selected>medium (balanced)</option>
+              <option value="critical">critical (cost-optimized)</option>
+              <option value="business_critical">business_critical (max resilience)</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="environment">Environment</label>
+            <select id="environment">
+              <option value="dev">dev</option>
+              <option value="staging">staging</option>
+              <option value="production">production</option>
+            </select>
+          </div>
+          <div>
+            <label for="size">Size</label>
+            <select id="size">
+              <option value="small">small</option>
+              <option value="medium">medium</option>
+              <option value="large">large</option>
+              <option value="xlarge">xlarge</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label for="storageGB">Storage (GB)</label>
+            <input type="number" id="storageGB" value="50" min="10" max="65536">
+          </div>
+          <div>
+            <div class="checkbox-row" style="margin-top: 1.5rem;">
+              <input type="checkbox" id="ha" checked>
+              <label for="ha" style="margin: 0;">High Availability</label>
+            </div>
+          </div>
+        </div>
+        <button type="submit" id="createBtn">Create MySQL Instance</button>
+        <p class="info">
+          The control plane decides provider, region, and runtime cluster.
+          You only specify the cell contract.
+        </p>
+      </form>
+      <div id="createResult"></div>
+    </div>
+
+    <hr>
+
+    <!-- Query Status -->
+    <div class="panel">
+      <h3>Query Instance Status</h3>
+      <form id="statusForm">
+        <div class="row">
+          <div>
+            <label for="statusNs">Namespace</label>
+            <input type="text" id="statusNs" value="default">
+          </div>
+          <div>
+            <label for="statusName">Name</label>
+            <input type="text" id="statusName" placeholder="my-app-db" required>
+          </div>
+        </div>
+        <button type="submit" id="statusBtn">Query Status</button>
+      </form>
+      <div id="statusResult"></div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = window.location.origin;
+
+    function renderJSON(containerId, data, isError) {
+      const container = document.getElementById(containerId);
+      const cls = isError ? "status-err" : "status-ok";
+      container.innerHTML =
+        '<pre class="' + cls + '">' + JSON.stringify(data, null, 2) + '</pre>';
+    }
+
+    // Create MySQL Instance
+    document.getElementById("createForm").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      var btn = document.getElementById("createBtn");
+      btn.disabled = true;
+      btn.textContent = "Creating...";
+
+      var payload = {
+        name: document.getElementById("name").value.trim(),
+        namespace: document.getElementById("namespace").value.trim() || "default",
+        cell: document.getElementById("cell").value.trim(),
+        tier: document.getElementById("tier").value,
+        environment: document.getElementById("environment").value,
+        size: document.getElementById("size").value,
+        storageGB: parseInt(document.getElementById("storageGB").value, 10),
+        ha: document.getElementById("ha").checked
+      };
+
+      try {
+        var resp = await fetch(API_BASE + "/api/mysql", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        var data = await resp.json();
+        renderJSON("createResult", data, !resp.ok);
+      } catch (err) {
+        renderJSON("createResult", { error: err.message }, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Create MySQL Instance";
+      }
+    });
+
+    // Query Status
+    document.getElementById("statusForm").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      var btn = document.getElementById("statusBtn");
+      btn.disabled = true;
+      btn.textContent = "Querying...";
+
+      var ns = document.getElementById("statusNs").value.trim() || "default";
+      var name = document.getElementById("statusName").value.trim();
+
+      try {
+        var resp = await fetch(API_BASE + "/api/status/mysql/" + ns + "/" + name);
+        var data = await resp.json();
+        renderJSON("statusResult", data, !resp.ok);
+      } catch (err) {
+        renderJSON("statusResult", { error: err.message }, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Query Status";
+      }
+    });
+  </script>
+</body>
+</html>
