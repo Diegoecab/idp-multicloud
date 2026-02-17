@@ -82,6 +82,40 @@ class PlacementDecision:
 
 # ── Circuit Breaker ──────────────────────────────────────────────────────────
 
+@dataclass
+class ServiceRequest:
+    """Generic service provisioning request.
+
+    Contains only the fields the scheduler needs. Product-specific
+    parameters (size, storageGB, cpu, memory, etc.) are validated
+    by the product registry and passed directly to the claim builder.
+    """
+    product: str
+    cell: str
+    tier: str
+    environment: str
+    ha: bool
+    namespace: str = "default"
+    name: str = ""
+
+    def validate(self) -> list:
+        """Return a list of validation errors (empty if valid)."""
+        errors = []
+        if not self.product:
+            errors.append("product is required")
+        if not self.cell:
+            errors.append("cell is required")
+        if not self.name:
+            errors.append("name is required")
+        if self.tier not in VALID_TIERS:
+            errors.append(f"tier must be one of {VALID_TIERS}")
+        if self.environment not in VALID_ENVIRONMENTS:
+            errors.append(f"environment must be one of {VALID_ENVIRONMENTS}")
+        return errors
+
+
+# ── Circuit Breaker ──────────────────────────────────────────────────────────
+
 class CircuitBreaker:
     """Per-provider circuit breaker: tracks failures and opens to prevent cascading calls.
 

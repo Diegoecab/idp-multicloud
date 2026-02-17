@@ -165,6 +165,88 @@ def delete_claim(namespace: str, name: str):
         raise
 
 
+# ── Generic CRD operations (multi-product) ──────────────────────────────────
+
+
+def _get_resource_for(api_version: str, kind: str):
+    """Get a dynamic resource handle for any CRD by apiVersion and kind."""
+    if _dynamic_client is None:
+        return None
+    try:
+        return _dynamic_client.resources.get(api_version=api_version, kind=kind)
+    except Exception as e:
+        logger.error("Failed to discover CRD %s/%s: %s", api_version, kind, e)
+        return None
+
+
+def get_claim_generic(api_version: str, kind: str, namespace: str, name: str):
+    """Fetch an existing claim of any product type. Returns None if not found."""
+    resource = _get_resource_for(api_version, kind)
+    if resource is None:
+        if not _k8s_available or _dynamic_client is None:
+            raise RuntimeError(
+                "Kubernetes client is not available. Cannot check for existing claims."
+            )
+        raise RuntimeError(f"{kind} CRD is not installed in the cluster.")
+
+    try:
+        obj = resource.get(name=name, namespace=namespace)
+        return obj.to_dict()
+    except Exception as e:
+        if hasattr(e, "status") and e.status == 404:
+            return None
+        logger.error("Error fetching claim %s/%s: %s", namespace, name, e)
+        raise
+
+
+def apply_claim_generic(api_version: str, kind: str, manifest: dict) -> dict:
+    """Apply a claim of any product type using server-side apply (SSA)."""
+    resource = _get_resource_for(api_version, kind)
+    if resource is None:
+        raise RuntimeError(
+            f"Cannot apply claim: {kind} CRD is not installed "
+            "or Kubernetes is not reachable."
+        )
+
+    namespace = manifest["metadata"]["namespace"]
+    try:
+        result = resource.server_side_apply(
+            body=manifest, namespace=namespace, field_manager="idp-controlplane",
+        )
+        return result.to_dict()
+    except AttributeError:
+        pass
+
+    name = manifest["metadata"]["name"]
+    try:
+        existing = resource.get(name=name, namespace=namespace)
+        manifest["metadata"]["resourceVersion"] = existing.metadata.resourceVersion
+        result = resource.replace(body=manifest, namespace=namespace)
+    except Exception as e:
+        if hasattr(e, "status") and e.status == 404:
+            result = resource.create(body=manifest, namespace=namespace)
+        else:
+            raise
+    return result.to_dict()
+
+
+def delete_claim_generic(api_version: str, kind: str, namespace: str, name: str):
+    """Delete an existing claim of any product type."""
+    resource = _get_resource_for(api_version, kind)
+    if resource is None:
+        raise RuntimeError(
+            f"Cannot delete claim: {kind} CRD is not installed "
+            "or Kubernetes is not reachable."
+        )
+
+    try:
+        resource.delete(name=name, namespace=namespace)
+    except Exception as e:
+        if hasattr(e, "status") and e.status == 404:
+            return
+        raise
+
+
 def get_secret_exists(namespace: str, name: str) -> bool:
     """Check whether a connection Secret exists (does NOT return secret data)."""
     if not _k8s_available or _api_client is None:

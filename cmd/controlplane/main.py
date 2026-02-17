@@ -1,7 +1,7 @@
 """IDP Multicloud Control Plane — Entry Point.
 
-Starts the Flask HTTP server that exposes the MySQL provisioning API
-and serves the minimal web UI.
+Starts the Flask HTTP server that exposes the multi-product provisioning API
+(MySQL, WebApp, and any registered products) and serves the minimal web UI.
 
 Usage:
     python cmd/controlplane/main.py
@@ -24,7 +24,9 @@ if PROJECT_ROOT not in sys.path:
 from flask import Flask, send_from_directory
 
 from internal.handlers.mysql import mysql_bp
+from internal.handlers.services import services_bp
 from internal.k8s.client import init_client
+import internal.products.catalog  # noqa: F401 — registers MySQL and WebApp products
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +41,7 @@ def create_app() -> Flask:
 
     # Register API routes
     app.register_blueprint(mysql_bp)
+    app.register_blueprint(services_bp)
 
     # Serve the minimal frontend
     web_dir = os.path.join(PROJECT_ROOT, "web")

@@ -1,23 +1,27 @@
 # IDP Multicloud
 
-A cell-based Internal Developer Platform (IDP) control plane for provisioning managed MySQL across AWS, GCP, and OCI. Developers declare **what** they need; the control plane decides **where** it runs.
+A cell-based Internal Developer Platform (IDP) control plane for provisioning managed cloud services (MySQL, WebApp, and more) across AWS, GCP, and OCI. Developers declare **what** they need; the control plane decides **where** it runs.
 
 ---
 
 ## Objective
 
-Provide a **cell-based contract** for developers to request managed MySQL instances while the control plane autonomously decides provider, region, runtime cluster, and network placement across multiple clouds using a **tiered criticality framework**.
+Provide a **cell-based contract** for developers to request managed cloud services while the control plane autonomously decides provider, region, runtime cluster, and network placement across multiple clouds using a **tiered criticality framework**.
 
 Developers specify only:
 
-| Field | Description |
-|-------|-------------|
-| `cell` | Logical cell identifier |
-| `tier` | Criticality tier (`low`, `medium`, `critical`, `business_critical`) |
-| `environment` | Target environment (`dev`, `staging`, `production`) |
-| `size` | Instance size (`small`, `medium`, `large`, `xlarge`) |
-| `storageGB` | Storage capacity (10–65536 GB) |
-| `ha` | High availability (boolean) |
+| Field | Description | Products |
+|-------|-------------|----------|
+| `cell` | Logical cell identifier | All |
+| `tier` | Criticality tier (`low`, `medium`, `critical`, `business_critical`) | All |
+| `environment` | Target environment (`dev`, `staging`, `production`) | All |
+| `ha` | High availability (boolean) | All |
+| `size` | Instance size (`small`, `medium`, `large`, `xlarge`) | MySQL |
+| `storageGB` | Storage capacity (10–65536 GB) | MySQL |
+| `image` | Container image to deploy | WebApp |
+| `cpu` | CPU allocation (`125m`–`4000m`) | WebApp |
+| `memory` | Memory allocation (`256Mi`–`8Gi`) | WebApp |
+| `replicas` | Number of replicas (1–20) | WebApp |
 
 The control plane decides: **provider**, **region**, **runtimeCluster**, and **network configuration**.
 
@@ -33,24 +37,25 @@ The platform is organized into three distinct layers with clear separation of co
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           DEVELOPER LAYER                                   │
 │                                                                             │
-│  Developer only specifies: cell, tier, environment, size, storageGB, ha     │
+│  Developer only specifies: cell, tier, environment, ha + product params     │
 │  Developer NEVER specifies: provider, region, runtimeCluster, network       │
 │                                                                             │
 │  ┌──────────┐   ┌──────────┐   ┌──────────┐                                │
 │  │ Web UI   │   │ curl/CLI │   │ CI/CD    │                                 │
 │  └────┬─────┘   └────┬─────┘   └────┬─────┘                                │
 │       └───────────────┴──────────────┘                                      │
-│                       │ POST /api/mysql                                     │
+│                       │ POST /api/services/<product>                        │
 ├───────────────────────┼─────────────────────────────────────────────────────┤
 │                       ▼                                                     │
 │                CONTROL PLANE LAYER  (Python/Flask)                          │
 │                                                                             │
 │  ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌──────────────────┐   │
 │  │ Validation  │─>│ Sticky Check │─>│ Scheduler  │─>│ Claim Builder    │   │
-│  │ + Contract  │  │ (K8s lookup) │  │ Gates +    │  │ MySQLInstance    │   │
-│  │ Enforcement │  │              │  │ Weighted   │  │ Claim manifest   │   │
-│  └─────────────┘  └──────────────┘  │ Scoring    │  └───────┬──────────┘   │
-│                                     └────────────┘          │ SSA Apply    │
+│  │ + Contract  │  │ (K8s lookup) │  │ Gates +    │  │ (Generic: any    │   │
+│  │ + Product   │  │              │  │ Weighted   │  │  registered      │   │
+│  │ Registry    │  │              │  │ Scoring    │  │  product CRD)    │   │
+│  └─────────────┘  └──────────────┘  └────────────┘  └───────┬──────────┘   │
+│                                                              │ SSA Apply    │
 │  No cloud credentials here.                                 │              │
 │  Only needs K8s access (kubeconfig or ServiceAccount).      │              │
 ├─────────────────────────────────────────────────────────────┼──────────────┤
@@ -495,6 +500,152 @@ curl -X POST http://localhost:8080/api/experiments -H "Content-Type: application
 
 ---
 
+## Multi-Product Architecture
+
+The platform supports **multiple cloud products** through an extensible product registry. Each product is a `ProductDefinition` that declares its CRD coordinates, parameters, and validation rules. The scheduler, tiers, experiments, and analytics are **product-agnostic** — they work identically for any registered product.
+
+### Registered Products
+
+| Product | Kind | API Version | Description |
+|---------|------|-------------|-------------|
+| `mysql` | `MySQLInstanceClaim` | `db.platform.example.org/v1alpha1` | Managed MySQL with backups, replication, failover |
+| `webapp` | `WebAppClaim` | `compute.platform.example.org/v1alpha1` | Web application compute with auto-scaling, LB, TLS |
+
+### How It Works
+
+```
+Developer Request
+       │
+       ▼
+┌──────────────┐     ┌───────────────┐     ┌────────────┐     ┌──────────────┐
+│ Product      │────>│ Parameter     │────>│ Scheduler  │────>│ Generic      │
+│ Registry     │     │ Validation    │     │ (same for  │     │ Claim Builder│
+│ (lookup by   │     │ (per-product  │     │  all       │     │ (from        │
+│  product     │     │  specs)       │     │  products) │     │  ProductDef) │
+│  name)       │     │               │     │            │     │              │
+└──────────────┘     └───────────────┘     └────────────┘     └──────────────┘
+```
+
+### Adding a New Product
+
+To add a new product (e.g., Redis, Load Balancer, Graph DB):
+
+**1. Define the product in `internal/products/catalog.py`:**
+
+```python
+from internal.products.registry import ProductDefinition, ParameterSpec, register_product
+
+REDIS = ProductDefinition(
+    name="redis",
+    display_name="Managed Redis Cache",
+    description="High-performance in-memory data store",
+    api_version="cache.platform.example.org/v1alpha1",
+    kind="RedisClaim",
+    composition_class="redis",
+    composition_group="cache.platform.example.org",
+    parameters=[
+        ParameterSpec(name="memory", param_type="choice",
+                      choices=("256Mi", "512Mi", "1Gi", "2Gi", "4Gi")),
+        ParameterSpec(name="replicas", param_type="int", min_value=1, max_value=6),
+        ParameterSpec(name="persistence", param_type="bool", required=False, default=False),
+    ],
+)
+register_product(REDIS)
+```
+
+**2. Install the corresponding Crossplane Composition in your cluster.**
+
+**3. Done.** The generic endpoint `POST /api/services/redis` is immediately available.
+
+### WebApp Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `image` | string | Yes | — | Container image (e.g., `registry.example.com/app:v1`) |
+| `port` | int | No | `8080` | Application listen port (1–65535) |
+| `cpu` | choice | No | `250m` | CPU: `125m`, `250m`, `500m`, `1000m`, `2000m`, `4000m` |
+| `memory` | choice | No | `512Mi` | Memory: `256Mi`, `512Mi`, `1Gi`, `2Gi`, `4Gi`, `8Gi` |
+| `replicas` | int | No | `2` | Number of replicas (1–20) |
+| `ha` | bool | No | `false` | Enable HA (enforces multi_az gate) |
+
+### Developer Flow Example
+
+A developer deploys a web application — they only specify what they need:
+
+```bash
+curl -s -X POST http://localhost:8080/api/services/webapp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "checkout-frontend",
+    "namespace": "team-checkout",
+    "cell": "cell-us-east",
+    "tier": "medium",
+    "environment": "production",
+    "image": "registry.example.com/checkout:v2.1.0",
+    "cpu": "500m",
+    "memory": "1Gi",
+    "replicas": 3
+  }'
+```
+
+Behind the scenes, the control plane:
+1. Looks up `webapp` in the product registry
+2. Validates common fields (cell, tier, environment) and product-specific params (image, cpu, memory, replicas)
+3. Checks for sticky placement (existing claim in K8s)
+4. Runs the scheduler: health filter → gate filter → HA enforcement → experiment weights → scoring → ranking
+5. Selects the best provider/region (e.g., AWS us-east-1)
+6. Builds a `WebAppClaim` manifest with the correct Crossplane composition selector
+7. Applies the claim to the cluster (or returns it in standalone mode)
+
+The developer gets back a placement decision without ever knowing which cloud provider was selected:
+
+```json
+{
+  "status": "created",
+  "product": "webapp",
+  "placement": {
+    "provider": "aws",
+    "region": "us-east-1",
+    "runtimeCluster": "eks-prod-use1"
+  },
+  "claim": {
+    "apiVersion": "compute.platform.example.org/v1alpha1",
+    "kind": "WebAppClaim",
+    "spec": {
+      "parameters": {
+        "image": "registry.example.com/checkout:v2.1.0",
+        "cpu": "500m",
+        "memory": "1Gi",
+        "replicas": 3,
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    }
+  }
+}
+```
+
+The same developer can also request a MySQL database using the **same contract pattern**:
+
+```bash
+curl -s -X POST http://localhost:8080/api/services/mysql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "checkout-db",
+    "namespace": "team-checkout",
+    "cell": "cell-us-east",
+    "tier": "medium",
+    "environment": "production",
+    "size": "large",
+    "storageGB": 100,
+    "ha": true
+  }'
+```
+
+Both products go through the **same scheduling pipeline** with the same HA enforcement, experiments, and analytics.
+
+---
+
 ## Project Structure
 
 ```
@@ -504,17 +655,21 @@ idp-multicloud/
 │       └── main.py                 # Entry point — Flask server
 ├── internal/
 │   ├── models/
-│   │   └── types.py                # Data types: MySQLRequest, Candidate, CircuitBreaker
+│   │   └── types.py                # Data types: MySQLRequest, ServiceRequest, Candidate
 │   ├── policy/
 │   │   └── tiers.py                # Criticality framework: tier gates and weights
 │   ├── scheduler/
 │   │   ├── scheduler.py            # Gate filter, weighted scoring, health, failover
 │   │   └── experiments.py          # A/B testing, feature flags, placement analytics
+│   ├── products/
+│   │   ├── registry.py             # Product registry: ProductDefinition, validation, claim builder
+│   │   └── catalog.py              # Product catalog: MySQL, WebApp (add new products here)
 │   ├── k8s/
-│   │   ├── client.py               # Kubernetes dynamic client (SSA, CRUD, delete)
-│   │   └── claim_builder.py        # Crossplane MySQLInstanceClaim builder
+│   │   ├── client.py               # Kubernetes dynamic client (SSA, CRUD, generic + MySQL)
+│   │   └── claim_builder.py        # Crossplane MySQLInstanceClaim builder (legacy)
 │   └── handlers/
-│       └── mysql.py                # Flask API: CRUD, failover, health, experiments
+│       ├── mysql.py                # MySQL-specific API (backward compatible)
+│       └── services.py             # Generic multi-product API: /api/services/<product>
 ├── web/
 │   └── index.html                  # Minimal frontend (vanilla HTML + JS)
 ├── tests/
@@ -522,7 +677,10 @@ idp-multicloud/
 │   ├── test_policy.py              # Tier framework tests
 │   ├── test_scheduler.py           # Scheduler logic tests
 │   ├── test_claim_builder.py       # Claim builder tests
-│   └── test_handlers.py            # API endpoint tests
+│   ├── test_handlers.py            # API endpoint tests (MySQL legacy)
+│   ├── test_experiments.py         # A/B testing and feature flag tests
+│   ├── test_product_registry.py    # Product registry unit tests
+│   └── test_services.py            # Generic services endpoint tests
 ├── requirements.txt
 └── README.md
 ```
@@ -530,6 +688,54 @@ idp-multicloud/
 ---
 
 ## API Endpoints
+
+### Generic Multi-Product Endpoints
+
+#### `GET /api/products`
+
+List all registered products and their parameter specifications.
+
+```json
+{
+  "products": [
+    {
+      "name": "mysql",
+      "display_name": "Managed MySQL",
+      "description": "Managed MySQL database with automatic backups, replication, and failover.",
+      "kind": "MySQLInstanceClaim",
+      "parameters": [
+        {"name": "size", "type": "choice", "required": true, "choices": ["small","medium","large","xlarge"]},
+        {"name": "storageGB", "type": "int", "required": true},
+        {"name": "ha", "type": "bool", "required": false, "default": false}
+      ]
+    },
+    {
+      "name": "webapp",
+      "display_name": "Web Application",
+      "kind": "WebAppClaim",
+      "parameters": [
+        {"name": "image", "type": "string", "required": true},
+        {"name": "cpu", "type": "choice", "required": false, "choices": ["125m","250m","500m","1000m","2000m","4000m"]},
+        {"name": "replicas", "type": "int", "required": false, "default": 2}
+      ]
+    }
+  ]
+}
+```
+
+#### `POST /api/services/<product>`
+
+Create a service instance for any registered product. Same scheduling pipeline for all products.
+
+#### `GET /api/services/<product>/<namespace>/<name>`
+
+Query the status of an existing claim for any product.
+
+#### `POST /api/services/<product>/<namespace>/<name>/failover`
+
+Force rescheduling of an existing claim (override sticky placement) for any product.
+
+### Legacy MySQL Endpoint
 
 ### `GET /health`
 
@@ -805,6 +1011,47 @@ curl -s http://localhost:8080/api/status/mysql/default/orders-db | python -m jso
 
 ```bash
 curl -s http://localhost:8080/health
+```
+
+### List available products
+
+```bash
+curl -s http://localhost:8080/api/products | python -m json.tool
+```
+
+### Create a WebApp (generic endpoint)
+
+```bash
+curl -s -X POST http://localhost:8080/api/services/webapp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "checkout-frontend",
+    "namespace": "team-checkout",
+    "cell": "cell-us-east",
+    "tier": "medium",
+    "environment": "production",
+    "image": "registry.example.com/checkout:v2.1.0",
+    "cpu": "500m",
+    "memory": "1Gi",
+    "replicas": 3
+  }' | python -m json.tool
+```
+
+### Create MySQL via generic endpoint
+
+```bash
+curl -s -X POST http://localhost:8080/api/services/mysql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "orders-db",
+    "namespace": "default",
+    "cell": "cell-us-east",
+    "tier": "medium",
+    "environment": "production",
+    "size": "large",
+    "storageGB": 100,
+    "ha": true
+  }' | python -m json.tool
 ```
 
 ---
@@ -1166,7 +1413,10 @@ metadata:
 rules:
   - apiGroups: ["db.platform.example.org"]
     resources: ["mysqlinstanceclaims"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["compute.platform.example.org"]
+    resources: ["webappclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]  # only check existence, never read data
@@ -1212,6 +1462,10 @@ kubectl get mysqlinstanceclaim test-db \
 
 ## Next Steps
 
+### More Products
+- Add Redis, PostgreSQL, Load Balancer, Graph DB, Cache products to `catalog.py`.
+- Each product only requires a `ProductDefinition` + Crossplane Composition.
+
 ### AuthN / AuthZ
 - Integrate OIDC/OAuth2 for API authentication.
 - Implement RBAC to restrict which teams can provision to which cells and tiers.
@@ -1227,14 +1481,7 @@ kubectl get mysqlinstanceclaim test-db \
 - Export Prometheus metrics: scheduling latency, placement distribution, gate rejection rates.
 - Build Grafana dashboards for control plane observability.
 
-### DR / Fallback Patterns
-- Implement automatic provider fallback when a region is unavailable.
-- Add circuit breakers for cloud provider API failures.
-- Support cross-region failover for `business_critical` tier instances.
-- Implement placement migration for disaster recovery scenarios.
-
 ### Additional Features
-- Support for PostgreSQL, Redis, and other managed services.
 - Multi-cluster federation for global placement.
 - Cost estimation and chargeback integration.
 - GitOps workflow integration (ArgoCD, Flux).

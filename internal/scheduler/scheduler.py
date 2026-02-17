@@ -16,7 +16,8 @@ Flow:
 """
 
 from internal.models.types import (
-    Candidate, CandidateScore, PlacementDecision, MySQLRequest, CircuitBreaker,
+    Candidate, CandidateScore, PlacementDecision, MySQLRequest, ServiceRequest,
+    CircuitBreaker,
 )
 from internal.policy.tiers import get_tier
 from internal.scheduler.experiments import (
@@ -173,7 +174,7 @@ def score_candidate(
     )
 
 
-def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
+def schedule(request, candidates=None) -> PlacementDecision:
     """Run the full scheduling pipeline and return a PlacementDecision.
 
     Pipeline stages:
