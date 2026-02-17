@@ -349,6 +349,152 @@ curl -X PUT http://localhost:8080/api/providers/aws/health \
 
 ---
 
+## Experimentation & Data-Driven Optimization
+
+Inspired by platform engineering practices at scale: continuous experimentation, data-driven decisions, fast iteration, and balancing stability with innovation.
+
+### A/B Testing on Placement Strategies
+
+Every placement decision can be part of an experiment. Test new scoring weights on a percentage of traffic before rolling them out.
+
+```bash
+# Create an experiment: test 60% cost weight on critical tier (20% of traffic)
+curl -X POST http://localhost:8080/api/experiments \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "exp-cost-boost-001",
+    "description": "Test higher cost weight for critical tier",
+    "variant_weights": {"latency": 0.10, "dr": 0.10, "maturity": 0.20, "cost": 0.60},
+    "traffic_percentage": 0.2,
+    "tier": "critical"
+  }'
+
+# List active experiments
+curl http://localhost:8080/api/experiments
+
+# Delete experiment when done
+curl -X DELETE http://localhost:8080/api/experiments/exp-cost-boost-001
+```
+
+**How it works:**
+- Traffic is split deterministically using a hash of `(experiment_id, request_name)` — the same request always lands in the same group
+- `control` group uses default tier weights, `variant` group uses experiment weights
+- The experiment group is recorded in the placement reason annotation for auditability
+- Set `traffic_percentage: 1.0` for full canary rollout, `0.1` for 10% canary
+
+```
+Request "orders-db"
+  │
+  ├── hash("exp-001:orders-db") → bucket 0.34
+  │   traffic_percentage: 0.5
+  │   0.34 < 0.50 → VARIANT (use experiment weights)
+  │
+  └── Placement scored with: {latency: 0.10, dr: 0.10, maturity: 0.20, cost: 0.60}
+      instead of default:    {latency: 0.15, dr: 0.15, maturity: 0.20, cost: 0.50}
+```
+
+### Feature Flags
+
+Toggle placement policies without redeploying. Iterate on behavior in production.
+
+```bash
+# Enable cost optimization mode (boosts cost weight by 20%)
+curl -X PUT http://localhost:8080/api/flags/prefer_cost_optimization \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+
+# List all flags
+curl http://localhost:8080/api/flags
+
+# Disable when done
+curl -X DELETE http://localhost:8080/api/flags/prefer_cost_optimization
+```
+
+Built-in feature flags:
+
+| Flag | Effect |
+|------|--------|
+| `prefer_cost_optimization` | Boost cost weight by 20% across all tiers (redistributing from other dimensions) |
+
+Custom flags can be checked in the scheduler via `get_feature_flag("your_flag")`.
+
+### Placement Analytics
+
+Every placement is tracked for data-driven optimization. Understand where workloads land, which providers win, and how experiments perform.
+
+```bash
+# View analytics dashboard
+curl http://localhost:8080/api/analytics
+```
+
+**Response:**
+```json
+{
+  "total_placements": 150,
+  "total_requests": 155,
+  "gate_rejection_rate": 0.0323,
+  "provider_distribution": {
+    "aws": { "count": 85, "percentage": 56.7 },
+    "gcp": { "count": 45, "percentage": 30.0 },
+    "oci": { "count": 20, "percentage": 13.3 }
+  },
+  "region_distribution": {
+    "aws/us-east-1": { "count": 50, "percentage": 33.3 },
+    "gcp/us-central1": { "count": 30, "percentage": 20.0 }
+  },
+  "tier_distribution": {
+    "medium": { "count": 80, "percentage": 53.3 },
+    "critical": { "count": 40, "percentage": 26.7 },
+    "low": { "count": 30, "percentage": 20.0 }
+  },
+  "avg_score_by_provider": {
+    "aws": 0.8125,
+    "gcp": 0.7950,
+    "oci": 0.7200
+  },
+  "experiments": {
+    "exp-cost-boost-001": { "control": 60, "variant": 15 }
+  }
+}
+```
+
+Use this data to:
+- **Detect imbalances**: if one provider gets 90% of traffic, consider adjusting weights
+- **Measure experiments**: compare avg scores between control and variant groups
+- **Track gate rejections**: high rejection rates indicate the candidate pool needs expansion
+- **Validate changes**: after adjusting weights or adding candidates, verify the impact
+
+### Experimentation Workflow
+
+A complete cycle for testing and rolling out a placement change:
+
+```bash
+# 1. Check current analytics baseline
+curl http://localhost:8080/api/analytics
+
+# 2. Create experiment with 10% traffic (small blast radius)
+curl -X POST http://localhost:8080/api/experiments -H "Content-Type: application/json" \
+  -d '{"id":"exp-dr-boost","description":"Boost DR weight for low tier",
+       "variant_weights":{"latency":0.20,"dr":0.45,"maturity":0.20,"cost":0.15},
+       "traffic_percentage":0.10,"tier":"low"}'
+
+# 3. Let it run, monitor analytics
+curl http://localhost:8080/api/analytics
+# → Check experiments.exp-dr-boost control vs variant counts and avg scores
+
+# 4. If results are positive, increase traffic to 50%
+curl -X DELETE http://localhost:8080/api/experiments/exp-dr-boost
+curl -X POST http://localhost:8080/api/experiments -H "Content-Type: application/json" \
+  -d '{"id":"exp-dr-boost-v2","description":"Boost DR weight (50% canary)",
+       "variant_weights":{"latency":0.20,"dr":0.45,"maturity":0.20,"cost":0.15},
+       "traffic_percentage":0.50,"tier":"low"}'
+
+# 5. If still good, go to 100% (full rollout)
+# 6. Update the tier definition in code and remove the experiment
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -358,16 +504,17 @@ idp-multicloud/
 │       └── main.py                 # Entry point — Flask server
 ├── internal/
 │   ├── models/
-│   │   └── types.py                # Data types: MySQLRequest, Candidate, PlacementDecision
+│   │   └── types.py                # Data types: MySQLRequest, Candidate, CircuitBreaker
 │   ├── policy/
 │   │   └── tiers.py                # Criticality framework: tier gates and weights
 │   ├── scheduler/
-│   │   └── scheduler.py            # Gate filter, weighted scoring, candidate ranking
+│   │   ├── scheduler.py            # Gate filter, weighted scoring, health, failover
+│   │   └── experiments.py          # A/B testing, feature flags, placement analytics
 │   ├── k8s/
-│   │   ├── client.py               # Kubernetes dynamic client (SSA, CRUD)
+│   │   ├── client.py               # Kubernetes dynamic client (SSA, CRUD, delete)
 │   │   └── claim_builder.py        # Crossplane MySQLInstanceClaim builder
 │   └── handlers/
-│       └── mysql.py                # Flask API route handlers
+│       └── mysql.py                # Flask API: CRUD, failover, health, experiments
 ├── web/
 │   └── index.html                  # Minimal frontend (vanilla HTML + JS)
 ├── tests/
@@ -529,6 +676,46 @@ Set the health status of a specific provider.
   "message": "Provider 'aws' marked as unhealthy"
 }
 ```
+
+### `GET /api/analytics`
+
+Placement analytics summary (provider distribution, scores, experiments).
+
+### `POST /api/experiments`
+
+Create an A/B experiment on placement scoring weights.
+
+**Request body:**
+
+```json
+{
+  "id": "exp-cost-boost-001",
+  "description": "Test higher cost weight for critical tier",
+  "variant_weights": {"latency": 0.10, "dr": 0.10, "maturity": 0.20, "cost": 0.60},
+  "traffic_percentage": 0.2,
+  "tier": "critical"
+}
+```
+
+### `GET /api/experiments`
+
+List all active experiments.
+
+### `DELETE /api/experiments/{id}`
+
+Delete an experiment.
+
+### `GET /api/flags`
+
+List all feature flags.
+
+### `PUT /api/flags/{name}`
+
+Set a feature flag. Body: `{ "enabled": true }`
+
+### `DELETE /api/flags/{name}`
+
+Delete a feature flag.
 
 ---
 

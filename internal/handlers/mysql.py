@@ -7,6 +7,12 @@ Endpoints:
   POST /api/mysql/<ns>/<name>/failover      — Force failover (override sticky placement)
   GET  /api/providers/health                — View provider health + circuit breakers
   PUT  /api/providers/<provider>/health     — Set provider health status
+  GET  /api/analytics                       — Placement analytics summary
+  POST /api/experiments                     — Create an A/B experiment
+  GET  /api/experiments                     — List all experiments
+  DELETE /api/experiments/<id>              — Delete an experiment
+  GET  /api/flags                           — List feature flags
+  PUT  /api/flags/<name>                    — Set a feature flag
 """
 
 import json
@@ -21,6 +27,15 @@ from internal.scheduler.scheduler import (
     get_all_provider_health,
     get_all_circuit_breakers,
     get_circuit_breaker,
+)
+from internal.scheduler.experiments import (
+    create_experiment,
+    list_experiments,
+    delete_experiment,
+    analytics,
+    set_feature_flag,
+    list_feature_flags,
+    delete_feature_flag,
 )
 from internal.k8s.claim_builder import build_claim
 from internal.k8s import client as k8s
@@ -327,3 +342,110 @@ def update_provider_health(provider: str):
         "healthy": healthy,
         "message": f"Provider '{provider}' marked as {'healthy' if healthy else 'unhealthy'}",
     }), 200
+
+
+# ── Analytics Endpoint ───────────────────────────────────────────────────────
+
+@mysql_bp.route("/api/analytics", methods=["GET"])
+def get_analytics():
+    """Return placement analytics summary for data-driven decisions.
+
+    Includes provider distribution, tier distribution, gate rejection rates,
+    average scores, and experiment group breakdowns.
+    """
+    return jsonify(analytics.get_summary()), 200
+
+
+# ── Experiment Endpoints ─────────────────────────────────────────────────────
+
+@mysql_bp.route("/api/experiments", methods=["GET"])
+def get_experiments():
+    """List all A/B experiments."""
+    return jsonify({"experiments": list_experiments()}), 200
+
+
+@mysql_bp.route("/api/experiments", methods=["POST"])
+def create_experiment_endpoint():
+    """Create a new A/B experiment on placement scoring weights.
+
+    Request body:
+      {
+        "id": "exp-cost-boost-001",
+        "description": "Test 10% higher cost weight for critical tier",
+        "variant_weights": {"latency": 0.10, "dr": 0.10, "maturity": 0.20, "cost": 0.60},
+        "traffic_percentage": 0.2,
+        "tier": "critical"
+      }
+    """
+    body = request.get_json(silent=True)
+    if body is None:
+        return jsonify({"error": "Request body must be valid JSON"}), 400
+
+    required = {"id", "description", "variant_weights", "traffic_percentage"}
+    missing = required - set(body.keys())
+    if missing:
+        return jsonify({"error": f"Missing required fields: {sorted(missing)}"}), 400
+
+    try:
+        exp = create_experiment(
+            experiment_id=body["id"],
+            description=body["description"],
+            variant_weights=body["variant_weights"],
+            traffic_percentage=body["traffic_percentage"],
+            tier=body.get("tier", "*"),
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify({
+        "status": "created",
+        "experiment": {
+            "id": exp.id,
+            "description": exp.description,
+            "variant_weights": exp.variant_weights,
+            "traffic_percentage": exp.traffic_percentage,
+            "tier": exp.tier,
+        },
+    }), 201
+
+
+@mysql_bp.route("/api/experiments/<experiment_id>", methods=["DELETE"])
+def delete_experiment_endpoint(experiment_id: str):
+    """Delete an experiment by ID."""
+    deleted = delete_experiment(experiment_id)
+    if not deleted:
+        return jsonify({"error": f"Experiment '{experiment_id}' not found"}), 404
+    return jsonify({"status": "deleted", "id": experiment_id}), 200
+
+
+# ── Feature Flag Endpoints ───────────────────────────────────────────────────
+
+@mysql_bp.route("/api/flags", methods=["GET"])
+def get_flags():
+    """List all feature flags."""
+    return jsonify({"flags": list_feature_flags()}), 200
+
+
+@mysql_bp.route("/api/flags/<name>", methods=["PUT"])
+def set_flag(name: str):
+    """Set a feature flag.
+
+    Request body:
+      { "enabled": true }
+    """
+    body = request.get_json(silent=True)
+    if body is None or "enabled" not in body:
+        return jsonify({"error": "Request body must include 'enabled' (boolean)"}), 400
+
+    enabled = bool(body["enabled"])
+    set_feature_flag(name, enabled)
+    return jsonify({"flag": name, "enabled": enabled}), 200
+
+
+@mysql_bp.route("/api/flags/<name>", methods=["DELETE"])
+def remove_flag(name: str):
+    """Delete a feature flag."""
+    deleted = delete_feature_flag(name)
+    if not deleted:
+        return jsonify({"error": f"Flag '{name}' not found"}), 404
+    return jsonify({"status": "deleted", "flag": name}), 200

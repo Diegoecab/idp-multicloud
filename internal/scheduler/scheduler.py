@@ -1,21 +1,27 @@
 """Placement scheduler: gate filtering, weighted scoring, candidate ranking,
-provider health checks, HA enforcement, and cross-cloud failover.
+provider health checks, HA enforcement, cross-cloud failover,
+and experiment-aware A/B testing.
 
 Flow:
   1. Load candidates from the registry.
   2. Filter unhealthy candidates (provider health status).
   3. Apply hard gates (reject candidates missing required capabilities for the tier).
   4. If ha=True, enforce multi_az as an additional gate.
-  5. Compute a weighted score for each surviving candidate.
-  6. Sort by score descending, select the winner.
-  7. For tiers that require DR, select a failover candidate in a DIFFERENT cloud.
-  8. Return a PlacementDecision with top-3 breakdown and optional failover.
+  5. Resolve scoring weights (apply active experiment if any).
+  6. Compute a weighted score for each surviving candidate.
+  7. Sort by score descending, select the winner.
+  8. For tiers that require DR, select a failover candidate in a DIFFERENT cloud.
+  9. Record placement in analytics for data-driven decisions.
+  10. Return a PlacementDecision with top-3 breakdown and optional failover.
 """
 
 from internal.models.types import (
     Candidate, CandidateScore, PlacementDecision, MySQLRequest, CircuitBreaker,
 )
 from internal.policy.tiers import get_tier
+from internal.scheduler.experiments import (
+    resolve_weights, analytics, get_feature_flag,
+)
 
 # ── Provider Health Registry ────────────────────────────────────────────────
 # Tracks health per provider. In production this would be fed by external probes.
@@ -120,13 +126,19 @@ CANDIDATES = [
 _FAILOVER_TIERS = {"low", "business_critical"}
 
 
-def score_candidate(candidate: Candidate, tier, ha_override: bool = False) -> CandidateScore:
+def score_candidate(
+    candidate: Candidate,
+    tier,
+    ha_override: bool = False,
+    weight_overrides: dict = None,
+) -> CandidateScore:
     """Evaluate a candidate against a tier: check gates, compute weighted score.
 
     Args:
         candidate: The provider/region candidate.
         tier: The tier definition.
         ha_override: If True, add multi_az as an additional hard gate.
+        weight_overrides: Optional custom weights (from experiment or feature flag).
     """
     gate_failures = []
     required = set(tier.required_capabilities)
@@ -141,9 +153,10 @@ def score_candidate(candidate: Candidate, tier, ha_override: bool = False) -> Ca
 
     passed = len(gate_failures) == 0
 
+    weights = weight_overrides if weight_overrides is not None else tier.weights
     subscores = {}
     total = 0.0
-    for dimension, weight in tier.weights.items():
+    for dimension, weight in weights.items():
         raw = candidate.scores.get(dimension, 0.0)
         weighted = raw * weight
         subscores[dimension] = round(raw, 4)
@@ -214,9 +227,29 @@ def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
             f"No healthy candidates available. All candidates skipped: {unhealthy_skipped}"
         )
 
-    # Stage 2+3 — Score with gate filtering (+ HA enforcement)
+    # Stage 2 — Resolve scoring weights (apply experiment if active)
+    effective_weights, experiment_info = resolve_weights(
+        request.tier, tier.weights, request.name,
+    )
+
+    # Feature flag: prefer_cost_optimization — boost cost weight by 20% (redistributed)
+    if get_feature_flag("prefer_cost_optimization"):
+        cost_boost = min(effective_weights.get("cost", 0.25) * 1.2, 0.60)
+        remaining = 1.0 - cost_boost
+        non_cost = {k: v for k, v in effective_weights.items() if k != "cost"}
+        non_cost_total = sum(non_cost.values()) or 1.0
+        effective_weights = {
+            k: round(v / non_cost_total * remaining, 4)
+            for k, v in non_cost.items()
+        }
+        effective_weights["cost"] = round(cost_boost, 4)
+
+    # Stage 3+4 — Score with gate filtering (+ HA enforcement) using effective weights
     ha_enforce = request.ha
-    scored = [score_candidate(c, tier, ha_override=ha_enforce) for c in healthy_pool]
+    scored = [
+        score_candidate(c, tier, ha_override=ha_enforce, weight_overrides=effective_weights)
+        for c in healthy_pool
+    ]
 
     # Filter by gates
     passed = [s for s in scored if s.passed_gates]
@@ -225,12 +258,13 @@ def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
             f"{s.provider}/{s.region}": s.gate_failures
             for s in scored
         }
+        analytics.record_gate_rejection()
         raise ValueError(
             f"No candidates pass the gate requirements for tier '{request.tier}'. "
             f"Gate failures: {failures}"
         )
 
-    # Stage 4 — Rank by total score (descending)
+    # Stage 5 — Rank by total score (descending)
     passed.sort(key=lambda s: s.total_score, reverse=True)
     top3 = passed[:3]
     winner = top3[0]
@@ -240,7 +274,7 @@ def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
         if c.provider == winner.provider and c.region == winner.region
     )
 
-    # Stage 5 — Failover: pick best candidate in a DIFFERENT cloud provider
+    # Stage 6 — Failover: pick best candidate in a DIFFERENT cloud provider
     failover_info = None
     if request.tier in _FAILOVER_TIERS:
         failover_candidates = [
@@ -273,7 +307,7 @@ def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
         "rpo_minutes": tier.rpo_minutes,
         "gates": effective_gates,
         "ha_enforced": ha_enforce,
-        "weights": tier.weights,
+        "weights": effective_weights,
         "selected": {
             "provider": winner.provider,
             "region": winner.region,
@@ -300,6 +334,18 @@ def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
         reason["unhealthy_skipped"] = unhealthy_skipped
     if failover_info:
         reason["failover"] = failover_info
+    if experiment_info:
+        reason["experiment"] = experiment_info
+
+    # Stage 7 — Record analytics for data-driven optimization
+    analytics.record_placement({
+        "provider": winner.provider,
+        "region": winner.region,
+        "tier": request.tier,
+        "total_score": winner.total_score,
+        "ha": request.ha,
+        "experiment": experiment_info,
+    })
 
     return PlacementDecision(
         provider=winner.provider,

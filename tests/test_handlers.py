@@ -18,6 +18,9 @@ from internal.scheduler.scheduler import (
     _provider_health, _provider_circuit_breakers,
     set_provider_health,
 )
+from internal.scheduler.experiments import (
+    _experiments, _feature_flags, analytics,
+)
 
 
 @pytest.fixture
@@ -29,13 +32,19 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def _reset_health_state():
-    """Reset provider health and circuit breakers between tests."""
+def _reset_all_state():
+    """Reset all mutable state between tests."""
     _provider_health.clear()
     _provider_circuit_breakers.clear()
+    _experiments.clear()
+    _feature_flags.clear()
+    analytics.reset()
     yield
     _provider_health.clear()
     _provider_circuit_breakers.clear()
+    _experiments.clear()
+    _feature_flags.clear()
+    analytics.reset()
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -325,3 +334,120 @@ def test_root(client):
     data = resp.get_json()
     assert data["service"] == "idp-multicloud-controlplane"
     assert data["status"] == "running"
+
+
+# ── Analytics Endpoint ───────────────────────────────────────────────────────
+
+def test_get_analytics_empty(client):
+    resp = client.get("/api/analytics")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["total_placements"] == 0
+
+
+def test_analytics_after_placement(client):
+    """Analytics should track placements made via the API."""
+    client.post("/api/mysql", json={
+        "name": "analytics-db", "cell": "c1", "tier": "medium",
+        "environment": "dev", "size": "small", "storageGB": 20, "ha": False,
+    })
+    resp = client.get("/api/analytics")
+    data = resp.get_json()
+    assert data["total_placements"] >= 1
+    assert len(data["provider_distribution"]) >= 1
+
+
+# ── Experiment Endpoints ─────────────────────────────────────────────────────
+
+def test_create_and_list_experiment(client):
+    resp = client.post("/api/experiments", json={
+        "id": "exp-test-001",
+        "description": "Test cost optimization",
+        "variant_weights": {"latency": 0.10, "dr": 0.10, "maturity": 0.20, "cost": 0.60},
+        "traffic_percentage": 0.5,
+        "tier": "critical",
+    })
+    assert resp.status_code == 201
+    assert resp.get_json()["experiment"]["id"] == "exp-test-001"
+
+    resp = client.get("/api/experiments")
+    assert resp.status_code == 200
+    exps = resp.get_json()["experiments"]
+    assert len(exps) == 1
+    assert exps[0]["id"] == "exp-test-001"
+
+
+def test_create_experiment_invalid_weights(client):
+    resp = client.post("/api/experiments", json={
+        "id": "bad", "description": "Bad",
+        "variant_weights": {"latency": 0.5, "dr": 0.5, "maturity": 0.5, "cost": 0.5},
+        "traffic_percentage": 0.5,
+    })
+    assert resp.status_code == 400
+    assert "sum to 1.0" in resp.get_json()["error"]
+
+
+def test_create_experiment_missing_fields(client):
+    resp = client.post("/api/experiments", json={"id": "x"})
+    assert resp.status_code == 400
+    assert "Missing required fields" in resp.get_json()["error"]
+
+
+def test_delete_experiment(client):
+    client.post("/api/experiments", json={
+        "id": "exp-del", "description": "To delete",
+        "variant_weights": {"latency": 0.25, "dr": 0.25, "maturity": 0.25, "cost": 0.25},
+        "traffic_percentage": 0.5,
+    })
+    resp = client.delete("/api/experiments/exp-del")
+    assert resp.status_code == 200
+
+    resp = client.delete("/api/experiments/nonexistent")
+    assert resp.status_code == 404
+
+
+def test_experiment_affects_placement(client):
+    """Create experiment with extreme cost weight, verify it changes placement."""
+    client.post("/api/experiments", json={
+        "id": "exp-cost-extreme",
+        "description": "Extreme cost",
+        "variant_weights": {"latency": 0.02, "dr": 0.02, "maturity": 0.06, "cost": 0.90},
+        "traffic_percentage": 1.0,
+        "tier": "critical",
+    })
+    resp = client.post("/api/mysql", json={
+        "name": "exp-db", "cell": "c1", "tier": "critical",
+        "environment": "dev", "size": "small", "storageGB": 20, "ha": False,
+    })
+    assert resp.status_code == 201
+    data = resp.get_json()
+    assert "experiment" in data["reason"]
+    assert data["reason"]["experiment"]["group"] == "variant"
+    # OCI has highest cost score — should win with 90% cost weight
+    assert data["placement"]["provider"] == "oci"
+
+
+# ── Feature Flag Endpoints ───────────────────────────────────────────────────
+
+def test_set_and_list_flags(client):
+    resp = client.put("/api/flags/test_flag", json={"enabled": True})
+    assert resp.status_code == 200
+    assert resp.get_json()["enabled"] is True
+
+    resp = client.get("/api/flags")
+    assert resp.status_code == 200
+    assert resp.get_json()["flags"]["test_flag"] is True
+
+
+def test_set_flag_missing_body(client):
+    resp = client.put("/api/flags/test", json={})
+    assert resp.status_code == 400
+
+
+def test_delete_flag(client):
+    client.put("/api/flags/temp", json={"enabled": True})
+    resp = client.delete("/api/flags/temp")
+    assert resp.status_code == 200
+
+    resp = client.delete("/api/flags/nonexistent")
+    assert resp.status_code == 404
