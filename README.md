@@ -167,10 +167,13 @@ A critical design principle: **the control plane never handles cloud credentials
 
 ### Scheduling Algorithm
 
-1. **Gate filtering**: Remove candidates that lack required capabilities for the tier.
-2. **Weighted scoring**: For each surviving candidate, compute `total = sum(raw_score[dim] * weight[dim])`.
-3. **Ranking**: Sort candidates by total score descending. Select the winner.
-4. **Audit trail**: Return a top-3 breakdown with scores and sub-scores in the placement reason.
+1. **Health filter**: Remove candidates whose provider is unhealthy or circuit breaker is open.
+2. **Gate filtering**: Remove candidates that lack required capabilities for the tier.
+3. **HA enforcement**: If `ha=true`, add `multi_az` as an additional hard gate (even for tiers that don't normally require it).
+4. **Weighted scoring**: For each surviving candidate, compute `total = sum(raw_score[dim] * weight[dim])`.
+5. **Ranking**: Sort candidates by total score descending. Select the winner.
+6. **Failover selection**: For `low` and `business_critical` tiers, select the best candidate in a **different cloud provider** as a DR failover target.
+7. **Audit trail**: Return a top-3 breakdown with scores and sub-scores in the placement reason.
 
 ### Candidate Pool
 
@@ -183,6 +186,166 @@ A critical design principle: **the control plane never handles cloud credentials
 | GCP | europe-west1 | PITR, Multi-AZ, Private networking |
 | OCI | us-ashburn-1 | PITR, Private networking |
 | OCI | eu-frankfurt-1 | PITR, Private networking |
+
+---
+
+## HA & DR Multicloud
+
+The platform implements several best practices for high availability and disaster recovery across multiple cloud providers.
+
+### HA Flag Enforcement
+
+When the developer sets `ha: true`, the scheduler enforces `multi_az` as a **hard gate** — even for tiers that don't normally require it. This ensures HA workloads always land on candidates with multi-AZ support.
+
+```
+Developer: { "ha": true, "tier": "critical" }
+
+Without HA enforcement:           With HA enforcement:
+  critical tier gate:               critical tier gate:
+    - private_networking              - private_networking
+                                      - multi_az  ← added automatically
+  Candidates: ALL 7 pass            Candidates: only AWS + GCP pass
+  OCI is eligible                    OCI is rejected (no multi_az)
+```
+
+| `ha` value | Effect on scheduling |
+|------------|---------------------|
+| `true` | Adds `multi_az` as hard gate. OCI candidates (single-AZ) are rejected. |
+| `false` | No extra gates. All candidates eligible based on tier alone. |
+
+### Cross-Cloud Failover Placement
+
+For `low` and `business_critical` tiers, the scheduler selects a **secondary failover target** in a different cloud provider. This enables active-passive DR across clouds.
+
+```
+Primary:   AWS us-east-1  (highest score)
+Failover:  GCP us-central1 (best score in a DIFFERENT cloud)
+                            ↑ anti-affinity: different_cloud_from_aws
+```
+
+The failover target is included in:
+- The API response (`failover` field)
+- The audit reason annotation (`reason.failover`)
+
+This enables operators to pre-provision standby replicas or configure DNS failover.
+
+| Tier | Failover included? | Rationale |
+|------|-------------------|-----------|
+| `low` | Yes | Strict SLA; needs cross-cloud DR standby |
+| `medium` | No | Balanced tier; single-cloud acceptable |
+| `critical` | No | Cost-driven; DR not prioritized |
+| `business_critical` | Yes | Highest criticality; cross-cloud replication mandatory |
+
+### Provider Health Management
+
+Operators can mark providers as unhealthy via the API. Unhealthy providers are excluded from scheduling.
+
+```bash
+# Mark AWS as unhealthy (e.g., during an outage)
+curl -X PUT http://localhost:8080/api/providers/aws/health \
+  -H "Content-Type: application/json" \
+  -d '{"healthy": false}'
+
+# All subsequent scheduling skips AWS candidates
+curl -X POST http://localhost:8080/api/mysql \
+  -H "Content-Type: application/json" \
+  -d '{"name":"db1","cell":"c1","tier":"medium","environment":"dev","size":"small","storageGB":20,"ha":false}'
+# → placement.provider will be gcp or oci (never aws)
+
+# View all provider health + circuit breaker status
+curl http://localhost:8080/api/providers/health
+
+# Restore AWS
+curl -X PUT http://localhost:8080/api/providers/aws/health \
+  -H "Content-Type: application/json" \
+  -d '{"healthy": true}'
+```
+
+Health status is tracked at two levels:
+- **Provider-level** (`set_provider_health`): operator-controlled, affects all candidates for that provider
+- **Candidate-level** (`Candidate.healthy`): per-region health, for future integration with automated probes
+
+### Circuit Breaker
+
+Each provider has a circuit breaker that opens automatically after repeated failures. This prevents cascading failures when a cloud provider API is degraded.
+
+```
+State diagram:
+
+   ┌────────┐  failures >= threshold  ┌────────┐  cooldown expired  ┌───────────┐
+   │ CLOSED │ ──────────────────────> │  OPEN  │ ────────────────> │ HALF_OPEN │
+   │        │                         │        │                    │           │
+   │ normal │                         │ block  │                    │ allow one │
+   │ traffic│ <────── success ─────── │  all   │ <── failure ───── │  probe    │
+   └────────┘                         └────────┘                    └───────────┘
+       ↑                                                                │
+       └───────────────────── success ──────────────────────────────────┘
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `failure_threshold` | 5 | Number of consecutive failures to open the circuit |
+| `cooldown_seconds` | 60 | Time to wait before allowing a probe request |
+
+When a circuit is open, all candidates from that provider are skipped during scheduling — similar to marking the provider unhealthy.
+
+### Forced Failover Endpoint
+
+During disaster recovery, operators can force rescheduling of an existing Claim to override sticky placement.
+
+```bash
+# Force failover of a specific instance (reschedule to any available provider)
+curl -X POST http://localhost:8080/api/mysql/default/orders-db/failover
+
+# Force failover excluding a specific provider (e.g., during AWS outage)
+curl -X POST http://localhost:8080/api/mysql/default/orders-db/failover \
+  -H "Content-Type: application/json" \
+  -d '{"exclude_providers": ["aws"]}'
+```
+
+The failover endpoint:
+1. Fetches the existing Claim parameters
+2. Deletes the existing Claim
+3. Runs the scheduler with an optionally filtered candidate pool
+4. Creates a new Claim at the newly selected provider/region
+
+**Response:**
+```json
+{
+  "status": "failover_complete",
+  "previous_provider": "aws",
+  "placement": {
+    "provider": "gcp",
+    "region": "us-central1",
+    "runtimeCluster": "gcp-usc1-prod-01",
+    "network": { ... }
+  },
+  "reason": { ... }
+}
+```
+
+### DR Runbook (Example)
+
+A typical disaster recovery sequence using these features:
+
+```bash
+# 1. Detect AWS outage → mark unhealthy
+curl -X PUT http://localhost:8080/api/providers/aws/health \
+  -d '{"healthy": false}' -H "Content-Type: application/json"
+
+# 2. Failover all critical workloads away from AWS
+for db in orders-db payments-db users-db; do
+  curl -X POST "http://localhost:8080/api/mysql/production/$db/failover" \
+    -d '{"exclude_providers": ["aws"]}' -H "Content-Type: application/json"
+done
+
+# 3. New requests automatically avoid AWS (health check + circuit breaker)
+# 4. When AWS recovers:
+curl -X PUT http://localhost:8080/api/providers/aws/health \
+  -d '{"healthy": true}' -H "Content-Type: application/json"
+
+# 5. Optionally failover back to AWS for cost optimization
+```
 
 ---
 
@@ -266,15 +429,18 @@ Create a managed MySQL instance. The control plane validates input, enforces the
     "tier": "medium",
     "rto_minutes": 120,
     "rpo_minutes": 15,
-    "gates": ["pitr", "private_networking"],
+    "gates": ["pitr", "private_networking", "multi_az"],
+    "ha_enforced": true,
     "weights": {"latency": 0.25, "dr": 0.25, "maturity": 0.25, "cost": 0.25},
     "selected": { "provider": "aws", "region": "us-east-1", "total_score": 0.8125 },
     "top_3_candidates": [ ... ],
     "candidates_evaluated": 7,
-    "candidates_passed_gates": 7
+    "candidates_healthy": 7,
+    "candidates_passed_gates": 5
   },
   "claim": { ... },
   "applied_to_cluster": false,
+  "failover": null,
   "namespace": "team-alpha",
   "name": "orders-db"
 }
@@ -304,6 +470,63 @@ Returns the full Claim object and connection Secret status. Secret values are **
     "namespace": "team-alpha",
     "exists": false
   }
+}
+```
+
+### `POST /api/mysql/{namespace}/{name}/failover`
+
+Force rescheduling of an existing Claim (override sticky placement for DR).
+
+**Request body (optional):**
+
+```json
+{
+  "exclude_providers": ["aws"]
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "status": "failover_complete",
+  "previous_provider": "aws",
+  "placement": { "provider": "gcp", "region": "us-central1", ... },
+  "reason": { ... },
+  "claim": { ... }
+}
+```
+
+### `GET /api/providers/health`
+
+View health status and circuit breaker state for all providers.
+
+```json
+{
+  "providers": { "aws": true, "gcp": true, "oci": false },
+  "circuit_breakers": {
+    "aws": { "state": "closed", "failure_count": 0, "failure_threshold": 5, "cooldown_seconds": 60 }
+  }
+}
+```
+
+### `PUT /api/providers/{provider}/health`
+
+Set the health status of a specific provider.
+
+**Request body:**
+
+```json
+{ "healthy": false }
+```
+
+**Response (200):**
+
+```json
+{
+  "provider": "aws",
+  "healthy": false,
+  "message": "Provider 'aws' marked as unhealthy"
 }
 ```
 

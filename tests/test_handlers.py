@@ -14,6 +14,11 @@ import pytest
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "cmd", "controlplane"))
 from main import create_app
 
+from internal.scheduler.scheduler import (
+    _provider_health, _provider_circuit_breakers,
+    set_provider_health,
+)
+
 
 @pytest.fixture
 def client():
@@ -21,6 +26,16 @@ def client():
     app.config["TESTING"] = True
     with app.test_client() as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _reset_health_state():
+    """Reset provider health and circuit breakers between tests."""
+    _provider_health.clear()
+    _provider_circuit_breakers.clear()
+    yield
+    _provider_health.clear()
+    _provider_circuit_breakers.clear()
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -145,6 +160,9 @@ def test_create_mysql_success(client):
     assert "top_3_candidates" in reason
     assert len(reason["top_3_candidates"]) >= 1
 
+    # Verify HA enforcement is in reason
+    assert "ha_enforced" in reason
+
     # Verify claim structure
     claim = data["claim"]
     assert claim["apiVersion"] == "db.platform.example.org/v1alpha1"
@@ -184,12 +202,119 @@ def test_create_mysql_all_tiers(client):
         assert resp.status_code == 201, f"Tier '{tier}' failed: {resp.get_json()}"
 
 
+# ── POST /api/mysql — HA Enforcement ─────────────────────────────────────────
+
+def test_create_mysql_ha_true_excludes_single_az(client):
+    """When ha=True, candidates without multi_az should be rejected."""
+    resp = client.post("/api/mysql", json={
+        "name": "ha-db",
+        "cell": "cell-us",
+        "tier": "critical",  # critical only requires private_networking
+        "environment": "dev",
+        "size": "small",
+        "storageGB": 20,
+        "ha": True,
+    })
+    assert resp.status_code == 201
+    data = resp.get_json()
+    # OCI candidates lack multi_az, so they should not be selected when ha=True
+    assert data["placement"]["provider"] in ("aws", "gcp")
+    assert data["reason"]["ha_enforced"] is True
+
+
+def test_create_mysql_ha_false_allows_oci(client):
+    """When ha=False, OCI candidates (without multi_az) are available."""
+    resp = client.post("/api/mysql", json={
+        "name": "no-ha-db",
+        "cell": "cell-us",
+        "tier": "critical",
+        "environment": "dev",
+        "size": "small",
+        "storageGB": 20,
+        "ha": False,
+    })
+    assert resp.status_code == 201
+    data = resp.get_json()
+    assert data["reason"]["ha_enforced"] is False
+
+
+# ── POST /api/mysql — Failover Included ──────────────────────────────────────
+
+def test_create_mysql_low_tier_includes_failover(client):
+    """Low tier response should include a failover in a different cloud."""
+    resp = client.post("/api/mysql", json={
+        "name": "lo-db",
+        "cell": "cell-us",
+        "tier": "low",
+        "environment": "production",
+        "size": "medium",
+        "storageGB": 50,
+        "ha": True,
+    })
+    assert resp.status_code == 201
+    data = resp.get_json()
+    assert "failover" in data
+    assert data["failover"]["provider"] != data["placement"]["provider"]
+
+
 # ── GET /api/status — Without K8s ────────────────────────────────────────────
 
 def test_status_without_k8s(client):
     """Without a K8s cluster, status should return 503."""
     resp = client.get("/api/status/mysql/default/nonexistent")
     assert resp.status_code in (404, 503)
+
+
+# ── Provider Health Endpoints ────────────────────────────────────────────────
+
+def test_get_providers_health(client):
+    resp = client.get("/api/providers/health")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "providers" in data
+    assert "circuit_breakers" in data
+
+
+def test_set_provider_unhealthy(client):
+    resp = client.put("/api/providers/aws/health", json={"healthy": False})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["provider"] == "aws"
+    assert data["healthy"] is False
+
+    # Verify it shows up in health endpoint
+    resp = client.get("/api/providers/health")
+    assert resp.get_json()["providers"]["aws"] is False
+
+
+def test_set_provider_healthy(client):
+    set_provider_health("aws", False)
+    resp = client.put("/api/providers/aws/health", json={"healthy": True})
+    assert resp.status_code == 200
+    assert resp.get_json()["healthy"] is True
+
+
+def test_set_provider_health_missing_body(client):
+    resp = client.put("/api/providers/aws/health", json={})
+    assert resp.status_code == 400
+
+
+def test_scheduling_skips_unhealthy_provider(client):
+    """Mark a provider unhealthy, verify it's skipped in scheduling."""
+    client.put("/api/providers/aws/health", json={"healthy": False})
+    resp = client.post("/api/mysql", json={
+        "name": "skip-aws-db",
+        "cell": "cell-us",
+        "tier": "medium",
+        "environment": "dev",
+        "size": "small",
+        "storageGB": 20,
+        "ha": False,
+    })
+    assert resp.status_code == 201
+    data = resp.get_json()
+    assert data["placement"]["provider"] != "aws"
+    assert "unhealthy_skipped" in data["reason"]
 
 
 # ── Root ──────────────────────────────────────────────────────────────────────

@@ -144,6 +144,27 @@ def apply_claim(manifest: dict) -> dict:
     return result.to_dict()
 
 
+def delete_claim(namespace: str, name: str):
+    """Delete an existing MySQLInstanceClaim (used during forced failover).
+
+    Raises:
+        RuntimeError: If Kubernetes is not configured or CRD is missing.
+    """
+    resource = _get_resource()
+    if resource is None:
+        raise RuntimeError(
+            "Cannot delete claim: Crossplane MySQLInstanceClaim CRD is not installed "
+            "or Kubernetes is not reachable."
+        )
+
+    try:
+        resource.delete(name=name, namespace=namespace)
+    except Exception as e:
+        if hasattr(e, "status") and e.status == 404:
+            return  # already gone
+        raise
+
+
 def get_secret_exists(namespace: str, name: str) -> bool:
     """Check whether a connection Secret exists (does NOT return secret data)."""
     if not _k8s_available or _api_client is None:

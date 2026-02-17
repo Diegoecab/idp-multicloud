@@ -1,9 +1,12 @@
 """HTTP handlers for the MySQL provisioning API.
 
 Endpoints:
-  GET  /health                           — Health check
-  POST /api/mysql                        — Create a managed MySQL instance
-  GET  /api/status/mysql/<ns>/<name>     — Query status of an existing claim
+  GET  /health                              — Health check
+  POST /api/mysql                           — Create a managed MySQL instance
+  GET  /api/status/mysql/<ns>/<name>        — Query status of an existing claim
+  POST /api/mysql/<ns>/<name>/failover      — Force failover (override sticky placement)
+  GET  /api/providers/health                — View provider health + circuit breakers
+  PUT  /api/providers/<provider>/health     — Set provider health status
 """
 
 import json
@@ -12,7 +15,13 @@ import logging
 from flask import Blueprint, request, jsonify
 
 from internal.models.types import MySQLRequest
-from internal.scheduler.scheduler import schedule
+from internal.scheduler.scheduler import (
+    schedule,
+    set_provider_health,
+    get_all_provider_health,
+    get_all_circuit_breakers,
+    get_circuit_breaker,
+)
 from internal.k8s.claim_builder import build_claim
 from internal.k8s import client as k8s
 
@@ -106,6 +115,10 @@ def create_mysql():
     except ValueError as e:
         return jsonify({"error": str(e)}), 422
 
+    # Record success on the provider's circuit breaker
+    cb = get_circuit_breaker(placement.provider)
+    cb.record_success()
+
     # Build Crossplane claim manifest
     claim = build_claim(req, placement)
 
@@ -121,6 +134,8 @@ def create_mysql():
     except Exception as e:
         apply_error = str(e)
         logger.error("Unexpected error applying claim: %s", e)
+        # Record failure on the provider's circuit breaker
+        cb.record_failure()
 
     response = {
         "status": "created",
@@ -139,6 +154,8 @@ def create_mysql():
     }
     if apply_error:
         response["apply_warning"] = apply_error
+    if placement.failover:
+        response["failover"] = placement.failover
 
     return jsonify(response), 201
 
@@ -172,4 +189,141 @@ def mysql_status(namespace: str, name: str):
             "namespace": namespace,
             "exists": secret_exists,
         },
+    }), 200
+
+
+# ── Failover Endpoint ────────────────────────────────────────────────────────
+
+@mysql_bp.route("/api/mysql/<namespace>/<name>/failover", methods=["POST"])
+def force_failover(namespace: str, name: str):
+    """Force rescheduling of an existing Claim (override sticky placement).
+
+    Use this during disaster recovery to migrate a workload to a different
+    provider/region. The existing Claim is deleted and a new one is created
+    with fresh scheduling.
+
+    Request body (optional):
+      { "exclude_providers": ["aws"] }  — exclude specific providers from scheduling
+    """
+    body = request.get_json(silent=True) or {}
+    exclude_providers = set(body.get("exclude_providers", []))
+
+    # Fetch existing Claim to extract the original request parameters
+    existing = None
+    try:
+        existing = k8s.get_claim(namespace, name)
+    except RuntimeError:
+        pass
+    except Exception as e:
+        logger.error("Error fetching claim for failover: %s", e)
+
+    if existing is None:
+        return jsonify({
+            "error": "not_found",
+            "message": f"MySQLInstanceClaim '{namespace}/{name}' not found. Cannot failover.",
+        }), 404
+
+    spec_params = existing.get("spec", {}).get("parameters", {})
+    current_provider = spec_params.get("provider", "unknown")
+
+    # Reconstruct the request from the existing Claim parameters
+    req = MySQLRequest(
+        cell=spec_params.get("cell", ""),
+        tier=spec_params.get("tier", "medium"),
+        environment=spec_params.get("environment", ""),
+        size=spec_params.get("size", "medium"),
+        storage_gb=spec_params.get("storageGB", 50),
+        ha=spec_params.get("ha", False),
+        namespace=namespace,
+        name=name,
+    )
+
+    # Import candidates and filter out excluded providers
+    from internal.scheduler.scheduler import CANDIDATES
+    filtered_candidates = [
+        c for c in CANDIDATES
+        if c.provider not in exclude_providers
+    ]
+
+    if not filtered_candidates:
+        return jsonify({
+            "error": f"No candidates remain after excluding providers: {sorted(exclude_providers)}",
+        }), 422
+
+    # Run the scheduler with filtered pool
+    try:
+        placement = schedule(req, candidates=filtered_candidates)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 422
+
+    # Delete existing Claim before applying the new one
+    try:
+        k8s.delete_claim(namespace, name)
+    except Exception as e:
+        logger.warning("Could not delete existing claim during failover: %s", e)
+
+    # Build and apply the new Claim
+    claim = build_claim(req, placement)
+    applied = False
+    apply_error = None
+    try:
+        k8s.apply_claim(claim)
+        applied = True
+    except RuntimeError as e:
+        apply_error = str(e)
+    except Exception as e:
+        apply_error = str(e)
+
+    response = {
+        "status": "failover_complete",
+        "previous_provider": current_provider,
+        "placement": {
+            "provider": placement.provider,
+            "region": placement.region,
+            "runtimeCluster": placement.runtime_cluster,
+            "network": placement.network,
+        },
+        "reason": placement.reason,
+        "claim": claim,
+        "applied_to_cluster": applied,
+        "namespace": namespace,
+        "name": name,
+    }
+    if apply_error:
+        response["apply_warning"] = apply_error
+    if placement.failover:
+        response["failover"] = placement.failover
+
+    return jsonify(response), 200
+
+
+# ── Provider Health Endpoints ────────────────────────────────────────────────
+
+@mysql_bp.route("/api/providers/health", methods=["GET"])
+def providers_health():
+    """Return health status and circuit breaker state for all providers."""
+    return jsonify({
+        "providers": get_all_provider_health(),
+        "circuit_breakers": get_all_circuit_breakers(),
+    }), 200
+
+
+@mysql_bp.route("/api/providers/<provider>/health", methods=["PUT"])
+def update_provider_health(provider: str):
+    """Set the health status of a specific provider.
+
+    Request body:
+      { "healthy": false }
+    """
+    body = request.get_json(silent=True)
+    if body is None or "healthy" not in body:
+        return jsonify({"error": "Request body must include 'healthy' (boolean)"}), 400
+
+    healthy = bool(body["healthy"])
+    set_provider_health(provider, healthy)
+
+    return jsonify({
+        "provider": provider,
+        "healthy": healthy,
+        "message": f"Provider '{provider}' marked as {'healthy' if healthy else 'unhealthy'}",
     }), 200

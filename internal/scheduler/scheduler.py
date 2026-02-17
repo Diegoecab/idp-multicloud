@@ -1,20 +1,58 @@
-"""Placement scheduler: gate filtering, weighted scoring, and candidate ranking.
+"""Placement scheduler: gate filtering, weighted scoring, candidate ranking,
+provider health checks, HA enforcement, and cross-cloud failover.
 
 Flow:
   1. Load candidates from the registry.
-  2. Apply hard gates (reject candidates missing required capabilities for the tier).
-  3. Compute a weighted score for each surviving candidate.
-  4. Sort by score descending, select the winner.
-  5. Return a PlacementDecision with a top-3 candidate breakdown in the reason JSON.
+  2. Filter unhealthy candidates (provider health status).
+  3. Apply hard gates (reject candidates missing required capabilities for the tier).
+  4. If ha=True, enforce multi_az as an additional gate.
+  5. Compute a weighted score for each surviving candidate.
+  6. Sort by score descending, select the winner.
+  7. For tiers that require DR, select a failover candidate in a DIFFERENT cloud.
+  8. Return a PlacementDecision with top-3 breakdown and optional failover.
 """
 
-from internal.models.types import Candidate, CandidateScore, PlacementDecision, MySQLRequest
+from internal.models.types import (
+    Candidate, CandidateScore, PlacementDecision, MySQLRequest, CircuitBreaker,
+)
 from internal.policy.tiers import get_tier
+
+# ── Provider Health Registry ────────────────────────────────────────────────
+# Tracks health per provider. In production this would be fed by external probes.
+
+_provider_health: dict[str, bool] = {}
+_provider_circuit_breakers: dict[str, CircuitBreaker] = {}
+
+
+def set_provider_health(provider: str, healthy: bool):
+    """Mark a provider as healthy or unhealthy (operator action or probe result)."""
+    _provider_health[provider] = healthy
+
+
+def get_provider_health(provider: str) -> bool:
+    """Return the health status of a provider (default: healthy)."""
+    return _provider_health.get(provider, True)
+
+
+def get_all_provider_health() -> dict:
+    """Return all provider health statuses."""
+    return dict(_provider_health)
+
+
+def get_circuit_breaker(provider: str) -> CircuitBreaker:
+    """Return (or create) the circuit breaker for a provider."""
+    if provider not in _provider_circuit_breakers:
+        _provider_circuit_breakers[provider] = CircuitBreaker()
+    return _provider_circuit_breakers[provider]
+
+
+def get_all_circuit_breakers() -> dict:
+    """Return all circuit breaker states keyed by provider."""
+    return {p: cb.to_dict() for p, cb in _provider_circuit_breakers.items()}
 
 
 # ── Candidate Registry ───────────────────────────────────────────────────────
 # In production this would come from a config file or database.
-# Each candidate represents a provider/region combination with known capabilities.
 
 CANDIDATES = [
     # AWS
@@ -78,11 +116,26 @@ CANDIDATES = [
     ),
 ]
 
+# Tiers that require a failover candidate in a different cloud provider
+_FAILOVER_TIERS = {"low", "business_critical"}
 
-def score_candidate(candidate: Candidate, tier) -> CandidateScore:
-    """Evaluate a candidate against a tier: check gates, compute weighted score."""
+
+def score_candidate(candidate: Candidate, tier, ha_override: bool = False) -> CandidateScore:
+    """Evaluate a candidate against a tier: check gates, compute weighted score.
+
+    Args:
+        candidate: The provider/region candidate.
+        tier: The tier definition.
+        ha_override: If True, add multi_az as an additional hard gate.
+    """
     gate_failures = []
-    for cap in tier.required_capabilities:
+    required = set(tier.required_capabilities)
+
+    # HA enforcement: if the developer requests ha=True, demand multi_az
+    if ha_override and "multi_az" not in required:
+        required.add("multi_az")
+
+    for cap in required:
         if cap not in candidate.capabilities:
             gate_failures.append(f"missing required capability: {cap}")
 
@@ -110,13 +163,19 @@ def score_candidate(candidate: Candidate, tier) -> CandidateScore:
 def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
     """Run the full scheduling pipeline and return a PlacementDecision.
 
+    Pipeline stages:
+      1. Health filter   — skip candidates whose provider is unhealthy or circuit-open
+      2. Gate filter      — reject candidates missing tier capabilities
+      3. HA enforcement   — if ha=True, add multi_az as an extra gate
+      4. Weighted scoring — rank surviving candidates
+      5. Failover select  — for critical tiers, pick a DR candidate in a different cloud
+
     Args:
         request: The developer's MySQL request.
         candidates: Optional override of the candidate pool (for testing).
 
     Returns:
-        PlacementDecision with provider, region, network, and a reason JSON
-        containing the top-3 candidate scoring breakdown.
+        PlacementDecision with provider, region, network, reason, and optional failover.
 
     Raises:
         ValueError: If the tier is unknown or no candidates pass the gates.
@@ -129,8 +188,35 @@ def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
     if not pool:
         raise ValueError("No candidates available in the registry")
 
-    # Score every candidate
-    scored = [score_candidate(c, tier) for c in pool]
+    # Stage 1 — Health filter: remove unhealthy or circuit-open candidates
+    healthy_pool = []
+    unhealthy_skipped = []
+    for c in pool:
+        provider_ok = get_provider_health(c.provider) and c.healthy
+        cb = get_circuit_breaker(c.provider)
+        circuit_ok = cb.allow_request()
+        if provider_ok and circuit_ok:
+            healthy_pool.append(c)
+        else:
+            reason = []
+            if not provider_ok:
+                reason.append("provider_unhealthy")
+            if not circuit_ok:
+                reason.append("circuit_open")
+            unhealthy_skipped.append({
+                "provider": c.provider,
+                "region": c.region,
+                "reasons": reason,
+            })
+
+    if not healthy_pool:
+        raise ValueError(
+            f"No healthy candidates available. All candidates skipped: {unhealthy_skipped}"
+        )
+
+    # Stage 2+3 — Score with gate filtering (+ HA enforcement)
+    ha_enforce = request.ha
+    scored = [score_candidate(c, tier, ha_override=ha_enforce) for c in healthy_pool]
 
     # Filter by gates
     passed = [s for s in scored if s.passed_gates]
@@ -144,23 +230,49 @@ def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
             f"Gate failures: {failures}"
         )
 
-    # Rank by total score (descending)
+    # Stage 4 — Rank by total score (descending)
     passed.sort(key=lambda s: s.total_score, reverse=True)
     top3 = passed[:3]
     winner = top3[0]
 
-    # Retrieve the full candidate object for the winner (to get network config)
     winner_candidate = next(
-        c for c in pool
+        c for c in healthy_pool
         if c.provider == winner.provider and c.region == winner.region
     )
+
+    # Stage 5 — Failover: pick best candidate in a DIFFERENT cloud provider
+    failover_info = None
+    if request.tier in _FAILOVER_TIERS:
+        failover_candidates = [
+            s for s in passed if s.provider != winner.provider
+        ]
+        if failover_candidates:
+            failover_winner = failover_candidates[0]
+            failover_candidate_obj = next(
+                c for c in healthy_pool
+                if c.provider == failover_winner.provider and c.region == failover_winner.region
+            )
+            failover_info = {
+                "provider": failover_winner.provider,
+                "region": failover_winner.region,
+                "runtime_cluster": failover_winner.runtime_cluster,
+                "network": failover_candidate_obj.network,
+                "total_score": failover_winner.total_score,
+                "anti_affinity": f"different_cloud_from_{winner.provider}",
+            }
+
+    # Build gates list — include the HA-enforced gate if applicable
+    effective_gates = list(tier.required_capabilities)
+    if ha_enforce and "multi_az" not in effective_gates:
+        effective_gates.append("multi_az")
 
     # Build auditable reason JSON
     reason = {
         "tier": request.tier,
         "rto_minutes": tier.rto_minutes,
         "rpo_minutes": tier.rpo_minutes,
-        "gates": list(tier.required_capabilities),
+        "gates": effective_gates,
+        "ha_enforced": ha_enforce,
         "weights": tier.weights,
         "selected": {
             "provider": winner.provider,
@@ -181,8 +293,13 @@ def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
             for i, c in enumerate(top3)
         ],
         "candidates_evaluated": len(pool),
+        "candidates_healthy": len(healthy_pool),
         "candidates_passed_gates": len(passed),
     }
+    if unhealthy_skipped:
+        reason["unhealthy_skipped"] = unhealthy_skipped
+    if failover_info:
+        reason["failover"] = failover_info
 
     return PlacementDecision(
         provider=winner.provider,
@@ -190,4 +307,5 @@ def schedule(request: MySQLRequest, candidates=None) -> PlacementDecision:
         runtime_cluster=winner.runtime_cluster,
         network=winner_candidate.network,
         reason=reason,
+        failover=failover_info,
     )

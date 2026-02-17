@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from typing import Optional
+import time
 
 
 VALID_TIERS = ("low", "medium", "critical", "business_critical")
@@ -52,6 +53,7 @@ class Candidate:
     network: dict
     capabilities: set
     scores: dict  # keys: latency, dr, maturity, cost — values: 0.0-1.0
+    healthy: bool = True  # dynamic health status — unhealthy candidates are skipped
 
 
 @dataclass
@@ -75,3 +77,59 @@ class PlacementDecision:
     network: dict
     reason: dict  # Full JSON-serializable reason including top-3 breakdown
     sticky: bool = False
+    failover: Optional[dict] = None  # secondary placement for DR (different cloud)
+
+
+# ── Circuit Breaker ──────────────────────────────────────────────────────────
+
+class CircuitBreaker:
+    """Per-provider circuit breaker: tracks failures and opens to prevent cascading calls.
+
+    States:
+      CLOSED  — normal operation, requests pass through
+      OPEN    — too many failures, requests are blocked for a cooldown period
+      HALF_OPEN — after cooldown, one probe request is allowed to test recovery
+    """
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+    def __init__(self, failure_threshold: int = 5, cooldown_seconds: int = 60):
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self._failure_count: int = 0
+        self._state: str = self.CLOSED
+        self._last_failure_time: float = 0.0
+
+    @property
+    def state(self) -> str:
+        if self._state == self.OPEN:
+            if time.time() - self._last_failure_time >= self.cooldown_seconds:
+                self._state = self.HALF_OPEN
+        return self._state
+
+    def record_success(self):
+        self._failure_count = 0
+        self._state = self.CLOSED
+
+    def record_failure(self):
+        self._failure_count += 1
+        self._last_failure_time = time.time()
+        if self._failure_count >= self.failure_threshold:
+            self._state = self.OPEN
+
+    def allow_request(self) -> bool:
+        s = self.state
+        if s == self.CLOSED:
+            return True
+        if s == self.HALF_OPEN:
+            return True  # allow one probe
+        return False
+
+    def to_dict(self) -> dict:
+        return {
+            "state": self.state,
+            "failure_count": self._failure_count,
+            "failure_threshold": self.failure_threshold,
+            "cooldown_seconds": self.cooldown_seconds,
+        }
