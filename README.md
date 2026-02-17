@@ -23,27 +23,126 @@ The control plane decides: **provider**, **region**, **runtimeCluster**, and **n
 
 ---
 
-## Architecture Overview
+## High-Level Architecture
+
+### System Layers
+
+The platform is organized into three distinct layers with clear separation of concerns:
 
 ```
-Developer Request                Control Plane                    Cloud Providers
-  (cell contract)            ┌──────────────────┐
-                             │                  │
-  POST /api/mysql  ─────────>│  Validation      │
-                             │       │          │
-                             │  Sticky Check    │──> K8s: existing Claim?
-                             │       │          │
-                             │  Gate Filter     │──> Reject candidates missing
-                             │       │          │    required capabilities
-                             │  Weighted Score  │──> Rank by tier weights
-                             │       │          │
-                             │  Claim Builder   │──> Build MySQLInstanceClaim
-                             │       │          │         ┌──────────┐
-                             │  SSA Apply ──────│────────>│ AWS RDS  │
-                             │                  │         │ GCP SQL  │
-                             └──────────────────┘         │ OCI MDS  │
-                                                          └──────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           DEVELOPER LAYER                                   │
+│                                                                             │
+│  Developer only specifies: cell, tier, environment, size, storageGB, ha     │
+│  Developer NEVER specifies: provider, region, runtimeCluster, network       │
+│                                                                             │
+│  ┌──────────┐   ┌──────────┐   ┌──────────┐                                │
+│  │ Web UI   │   │ curl/CLI │   │ CI/CD    │                                 │
+│  └────┬─────┘   └────┬─────┘   └────┬─────┘                                │
+│       └───────────────┴──────────────┘                                      │
+│                       │ POST /api/mysql                                     │
+├───────────────────────┼─────────────────────────────────────────────────────┤
+│                       ▼                                                     │
+│                CONTROL PLANE LAYER  (Python/Flask)                          │
+│                                                                             │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌──────────────────┐   │
+│  │ Validation  │─>│ Sticky Check │─>│ Scheduler  │─>│ Claim Builder    │   │
+│  │ + Contract  │  │ (K8s lookup) │  │ Gates +    │  │ MySQLInstance    │   │
+│  │ Enforcement │  │              │  │ Weighted   │  │ Claim manifest   │   │
+│  └─────────────┘  └──────────────┘  │ Scoring    │  └───────┬──────────┘   │
+│                                     └────────────┘          │ SSA Apply    │
+│  No cloud credentials here.                                 │              │
+│  Only needs K8s access (kubeconfig or ServiceAccount).      │              │
+├─────────────────────────────────────────────────────────────┼──────────────┤
+│                       DATA PLANE LAYER  (Kubernetes + Crossplane)           │
+│                                                              ▼              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                    Kubernetes Cluster                                │   │
+│  │                                                                      │   │
+│  │  ┌─────────────────┐    ┌───────────────────────────────────────┐   │   │
+│  │  │  Crossplane      │    │  MySQLInstanceClaim (Custom Resource) │   │   │
+│  │  │  Core Controller │    │  + placement-reason annotation        │   │   │
+│  │  └────────┬─────────┘    └───────────────────────────────────────┘   │   │
+│  │           │                                                          │   │
+│  │           ▼                                                          │   │
+│  │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐         │   │
+│  │  │ AWS Provider   │  │ GCP Provider   │  │ OCI Provider   │         │   │
+│  │  │                │  │                │  │                │         │   │
+│  │  │ ProviderConfig │  │ ProviderConfig │  │ ProviderConfig │         │   │
+│  │  │ + Credentials  │  │ + Credentials  │  │ + Credentials  │         │   │
+│  │  │   (K8s Secret) │  │   (K8s Secret) │  │   (K8s Secret) │         │   │
+│  │  └───────┬────────┘  └───────┬────────┘  └───────┬────────┘         │   │
+│  │          │                   │                    │                  │   │
+│  └──────────┼───────────────────┼────────────────────┼──────────────────┘   │
+│             │                   │                    │                      │
+├─────────────┼───────────────────┼────────────────────┼──────────────────────┤
+│             ▼                   ▼                    ▼                      │
+│                        CLOUD PROVIDER LAYER                                 │
+│                                                                             │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐          │
+│  │   AWS             │  │   GCP             │  │   OCI             │         │
+│  │   Amazon RDS      │  │   Cloud SQL       │  │   MySQL Database  │         │
+│  │   (MySQL)         │  │   (MySQL)         │  │   Service (MDS)   │         │
+│  │                   │  │                   │  │                   │         │
+│  │   VPC, Subnets,   │  │   VPC, Subnets,   │  │   VCN, Subnets,   │         │
+│  │   Security Groups │  │   Firewall Rules  │  │   Security Lists  │         │
+│  └──────────────────┘  └──────────────────┘  └──────────────────┘          │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Request Lifecycle
+
+```
+  Developer                Control Plane             Kubernetes/Crossplane        Cloud
+     │                          │                            │                      │
+     │  POST /api/mysql         │                            │                      │
+     │  {cell, tier, env,       │                            │                      │
+     │   size, storageGB, ha}   │                            │                      │
+     │ ────────────────────────>│                            │                      │
+     │                          │                            │                      │
+     │                          │  1. Validate input         │                      │
+     │                          │  2. Reject if developer    │                      │
+     │                          │     sent provider/region   │                      │
+     │                          │                            │                      │
+     │                          │  3. Sticky check ─────────>│ GET Claim            │
+     │                          │     (if exists, return it) │ {namespace, name}    │
+     │                          │                            │                      │
+     │                          │  4. Gate filter:           │                      │
+     │                          │     Remove candidates      │                      │
+     │                          │     missing tier caps      │                      │
+     │                          │                            │                      │
+     │                          │  5. Weighted scoring:      │                      │
+     │                          │     latency * w_l +        │                      │
+     │                          │     dr * w_d +             │                      │
+     │                          │     maturity * w_m +       │                      │
+     │                          │     cost * w_c             │                      │
+     │                          │                            │                      │
+     │                          │  6. Select winner          │                      │
+     │                          │     (highest score)        │                      │
+     │                          │                            │                      │
+     │                          │  7. Build Claim ──────────>│ SSA Apply            │
+     │                          │     MySQLInstanceClaim     │ MySQLInstanceClaim   │
+     │                          │     + placement-reason     │         │            │
+     │                          │       annotation           │         ▼            │
+     │                          │                            │  Crossplane ────────>│ Provision
+     │                          │                            │  reconciles          │ RDS / SQL
+     │  201 Created             │                            │  the Claim           │ / MDS
+     │  {placement, reason,     │                            │                      │
+     │   claim, top-3}          │                            │                      │
+     │ <────────────────────────│                            │                      │
+     │                          │                            │                      │
+```
+
+### Credential Boundary
+
+A critical design principle: **the control plane never handles cloud credentials**.
+
+| Component | Has Cloud Credentials? | Has K8s Access? | Role |
+|-----------|----------------------|-----------------|------|
+| **Control Plane** (Python) | No | Yes (kubeconfig or ServiceAccount) | Decides placement, builds and applies Claims |
+| **Crossplane Providers** | Yes (via K8s Secrets) | Yes (in-cluster) | Reconciles Claims into actual cloud resources |
+| **K8s Secrets** | Yes (stores credentials) | N/A | Secure storage for provider credentials |
+| **ProviderConfig** | References Secrets | N/A | Binds a Crossplane Provider to its credentials |
 
 ### Key Concepts
 
@@ -51,6 +150,7 @@ Developer Request                Control Plane                    Cloud Provider
 - **Sticky placement**: If a Claim already exists for `{namespace, name}`, the control plane returns the existing placement without rescheduling — preventing unnecessary migrations.
 - **Auditable decisions**: Every placement stores a JSON reason annotation with the full top-3 candidate scoring breakdown, gates applied, and weights used.
 - **Crossplane integration**: The control plane generates `MySQLInstanceClaim` custom resources and applies them to the cluster via server-side apply (SSA).
+- **Separation of concerns**: The control plane handles scheduling logic only. Crossplane handles cloud API communication and credentials. Kubernetes Secrets provide secure credential storage.
 
 ---
 
@@ -299,14 +399,223 @@ curl -s http://localhost:8080/health
 
 ---
 
+## Cloud Provider Credentials
+
+Cloud credentials are managed **entirely by Crossplane** inside the Kubernetes cluster. The control plane Python process never touches them.
+
+### How It Works
+
+```
+K8s Secret (credentials)  ──>  ProviderConfig  ──>  Crossplane Provider  ──>  Cloud API
+```
+
+1. Credentials are stored as **Kubernetes Secrets** in the `crossplane-system` namespace.
+2. A **ProviderConfig** resource references the Secret and tells the Crossplane Provider how to authenticate.
+3. When the control plane applies a `MySQLInstanceClaim`, Crossplane's reconciliation loop uses the ProviderConfig to call the appropriate cloud API.
+
+### AWS Credentials
+
+```yaml
+# Secret: AWS access keys or IAM role credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-credentials
+  namespace: crossplane-system
+type: Opaque
+stringData:
+  credentials: |
+    [default]
+    aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+    aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+---
+# ProviderConfig: tells the AWS Provider how to authenticate
+apiVersion: aws.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: aws-credentials
+      key: credentials
+```
+
+**Production recommendation**: Use IRSA (IAM Roles for Service Accounts) instead of static keys:
+
+```yaml
+apiVersion: aws.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+spec:
+  credentials:
+    source: IRSA
+```
+
+### GCP Credentials
+
+```yaml
+# Secret: GCP service account JSON key
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gcp-credentials
+  namespace: crossplane-system
+type: Opaque
+stringData:
+  credentials: |
+    {
+      "type": "service_account",
+      "project_id": "my-project-id",
+      "private_key_id": "key-id-here",
+      "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n",
+      "client_email": "crossplane@my-project-id.iam.gserviceaccount.com",
+      "client_id": "123456789",
+      "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+      "token_uri": "https://oauth2.googleapis.com/token"
+    }
+
+---
+# ProviderConfig: tells the GCP Provider how to authenticate
+apiVersion: gcp.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+spec:
+  projectID: my-project-id
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: gcp-credentials
+      key: credentials
+```
+
+**Production recommendation**: Use Workload Identity Federation for keyless authentication.
+
+### OCI Credentials
+
+```yaml
+# Secret: OCI API key configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oci-credentials
+  namespace: crossplane-system
+type: Opaque
+stringData:
+  credentials: |
+    {
+      "tenancy_ocid": "ocid1.tenancy.oc1..aaaaaaaaexample",
+      "user_ocid": "ocid1.user.oc1..aaaaaaaaexample",
+      "fingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+      "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----\n",
+      "region": "us-ashburn-1"
+    }
+
+---
+# ProviderConfig: tells the OCI Provider how to authenticate
+apiVersion: oci.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: oci-credentials
+      key: credentials
+```
+
+**Production recommendation**: Use OCI Instance Principals when running on OCI compute.
+
+### Security Best Practices
+
+| Practice | Description |
+|----------|-------------|
+| **Never commit credentials** | Use `kubectl create secret` or a secrets manager, never YAML files in git |
+| **Use cloud-native identity** | IRSA (AWS), Workload Identity (GCP), Instance Principals (OCI) |
+| **Least privilege** | Grant only the permissions Crossplane needs (e.g., `rds:CreateDBInstance`) |
+| **Rotate regularly** | Automate key rotation via Vault, AWS Secrets Manager, or similar |
+| **Namespace isolation** | Keep credentials in `crossplane-system`, restrict RBAC access |
+| **Audit access** | Enable CloudTrail (AWS), Cloud Audit Logs (GCP), Audit (OCI) |
+
+---
+
 ## Deploying to a Cluster
 
-### Expected Crossplane Objects
+### Prerequisites
 
-Before the control plane can apply claims to a cluster, the following must be installed:
+- A Kubernetes cluster (v1.24+)
+- Helm 3
+- `kubectl` configured to access the cluster
 
-1. **Crossplane** (v1.14+)
-2. **Custom CRD** for `MySQLInstanceClaim`:
+### Step 1: Install Crossplane
+
+```bash
+helm repo add crossplane-stable https://charts.crossplane.io/stable
+helm repo update
+
+helm install crossplane crossplane-stable/crossplane \
+  --namespace crossplane-system \
+  --create-namespace \
+  --wait
+```
+
+### Step 2: Install Cloud Providers
+
+```bash
+kubectl apply -f - <<EOF
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-aws-rds
+spec:
+  package: xpkg.upbound.io/upbound/provider-aws-rds:v1.5.0
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-gcp-sql
+spec:
+  package: xpkg.upbound.io/upbound/provider-gcp-sql:v1.5.0
+---
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-oci-mysql
+spec:
+  package: xpkg.upbound.io/upbound/provider-oci-mysql:v0.5.0
+EOF
+
+# Wait for providers to become healthy
+kubectl get providers -w
+```
+
+### Step 3: Configure Credentials
+
+Create the Secrets and ProviderConfigs for each cloud provider (see [Cloud Provider Credentials](#cloud-provider-credentials) above).
+
+```bash
+# Example: create AWS credentials from a file
+kubectl create secret generic aws-credentials \
+  --namespace crossplane-system \
+  --from-file=credentials=./aws-credentials.ini
+
+# Apply the ProviderConfig
+kubectl apply -f provider-config-aws.yaml
+```
+
+Repeat for GCP and OCI.
+
+### Step 4: Install the MySQLInstanceClaim CRD
+
+The Crossplane XRD (CompositeResourceDefinition) defines the claim schema:
 
 ```yaml
 apiVersion: apiextensions.crossplane.io/v1
@@ -346,9 +655,12 @@ spec:
                     network: { type: object }
 ```
 
-3. **Compositions** for each provider:
+### Step 5: Create Compositions (one per provider)
+
+Each Composition maps a `MySQLInstanceClaim` to provider-specific managed resources:
 
 ```yaml
+# composition-mysql-aws.yaml
 apiVersion: apiextensions.crossplane.io/v1
 kind: Composition
 metadata:
@@ -368,10 +680,64 @@ spec:
         spec:
           forProvider:
             engine: mysql
-            # ... provider-specific configuration
+            engineVersion: "8.0"
+            instanceClass: db.t3.medium
+            allocatedStorage: 50
+            publiclyAccessible: false
+
+---
+# composition-mysql-gcp.yaml
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: mysql-gcp
+  labels:
+    db.platform.example.org/provider: gcp
+    db.platform.example.org/class: mysql
+spec:
+  compositeTypeRef:
+    apiVersion: db.platform.example.org/v1alpha1
+    kind: MySQLInstanceClaim
+  resources:
+    - name: cloudsql-instance
+      base:
+        apiVersion: sql.gcp.upbound.io/v1beta1
+        kind: DatabaseInstance
+        spec:
+          forProvider:
+            databaseVersion: MYSQL_8_0
+            settings:
+              - tier: db-f1-micro
+
+---
+# composition-mysql-oci.yaml
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: mysql-oci
+  labels:
+    db.platform.example.org/provider: oci
+    db.platform.example.org/class: mysql
+spec:
+  compositeTypeRef:
+    apiVersion: db.platform.example.org/v1alpha1
+    kind: MySQLInstanceClaim
+  resources:
+    - name: mds-instance
+      base:
+        apiVersion: mysql.oci.upbound.io/v1beta1
+        kind: MysqlDbSystem
+        spec:
+          forProvider:
+            shapeName: MySQL.VM.Standard.E3.1.8GB
 ```
 
-### Deployment
+The `compositionSelector.matchLabels` in the Claim (set automatically by the control plane) selects the correct Composition:
+- `db.platform.example.org/provider: aws` → `mysql-aws`
+- `db.platform.example.org/provider: gcp` → `mysql-gcp`
+- `db.platform.example.org/provider: oci` → `mysql-oci`
+
+### Step 6: Deploy the Control Plane
 
 ```bash
 # Build container
@@ -380,6 +746,56 @@ docker build -t idp-controlplane:latest .
 # Deploy to Kubernetes
 kubectl create deployment idp-controlplane --image=idp-controlplane:latest
 kubectl expose deployment idp-controlplane --port=8080
+
+# The control plane needs RBAC to manage MySQLInstanceClaims
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idp-controlplane
+rules:
+  - apiGroups: ["db.platform.example.org"]
+    resources: ["mysqlinstanceclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]  # only check existence, never read data
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: idp-controlplane
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: idp-controlplane
+  apiGroup: rbac.authorization.k8s.io
+EOF
+```
+
+### End-to-End Verification
+
+```bash
+# Verify Crossplane is healthy
+kubectl get providers
+
+# Verify XRD is installed
+kubectl get xrd mysqlinstanceclaims.db.platform.example.org
+
+# Create an instance via the API
+curl -X POST http://<control-plane-ip>:8080/api/mysql \
+  -H "Content-Type: application/json" \
+  -d '{"name":"test-db","cell":"cell-us","tier":"medium","environment":"dev","size":"small","storageGB":20,"ha":false}'
+
+# Watch the Claim being reconciled
+kubectl get mysqlinstanceclaims -w
+
+# Check the placement reason annotation
+kubectl get mysqlinstanceclaim test-db \
+  -o jsonpath='{.metadata.annotations.platform\.example\.org/placement-reason}' | python -m json.tool
 ```
 
 ---
