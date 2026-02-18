@@ -1269,30 +1269,41 @@ Create the Secrets and ProviderConfigs for each cloud provider (see [Cloud Provi
 
 ```bash
 # Example: create AWS credentials from a file
-kubectl create secret generic aws-credentials \
-  --namespace crossplane-system \
+kubectl -n crossplane-system create secret generic aws-credentials \
   --from-file=credentials=./aws-credentials.ini
 
 # Apply the ProviderConfig
-kubectl apply -f provider-config-aws.yaml
+kubectl apply -f - <<EOF
+apiVersion: aws.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: aws-credentials
+      key: credentials
+EOF
 ```
 
 Repeat for GCP and OCI.
 
-### Step 4: Install the MySQLInstanceClaim CRD
+### Step 4: Create XRD (Composite + Claim)
 
 The Crossplane XRD (CompositeResourceDefinition) defines the claim schema:
 
-```yaml
+cat > xrd-mysql.yaml <<'EOF'
 apiVersion: apiextensions.crossplane.io/v1
 kind: CompositeResourceDefinition
 metadata:
-  name: mysqlinstanceclaims.db.platform.example.org
+  name: xmysqlinstances.db.platform.example.org
 spec:
   group: db.platform.example.org
   names:
-    kind: MySQLInstanceClaim
-    plural: mysqlinstanceclaims
+    kind: XMySQLInstance
+    plural: xmysqlinstances
   claimNames:
     kind: MySQLInstanceClaim
     plural: mysqlinstanceclaims
@@ -1309,19 +1320,45 @@ spec:
               properties:
                 parameters:
                   type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                compositionSelector:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                writeConnectionSecretToRef:
+                  type: object
                   properties:
-                    cell: { type: string }
-                    environment: { type: string }
-                    tier: { type: string }
-                    provider: { type: string }
-                    region: { type: string }
-                    size: { type: string }
-                    storageGB: { type: integer }
-                    ha: { type: boolean }
-                    network: { type: object }
-```
+                    name:
+                      type: string
+                  required:
+                    - name
+              required:
+                - parameters
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+EOF
+
+kubectl apply -f xrd-mysql.yaml
+#Verify
+kubectl api-resources | grep mysql
 
 ### Step 5: Create Compositions (one per provider)
+
+#Install Composition Function (Pipeline Mode)
+cat > function-patch-and-transform.yaml <<'EOF'
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: function-patch-and-transform
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/function-patch-and-transform:v0.8.2
+EOF
+
+kubectl apply -f function-patch-and-transform.yaml
+kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
+
+kubectl apply -f function-patch-and-transform.yaml
+kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
 
 Each Composition maps a `MySQLInstanceClaim` to provider-specific managed resources:
 
