@@ -1452,7 +1452,7 @@ kubectl expose deployment idp-controlplane --port=8080
 
 #If deployment already exists
 kubectl set image deployment/idp-controlplane idp-controlplane=idp-controlplane:latest
-kubectl rollout status deployment/idp-controlplane
+kubectl rollout restart deployment/idp-controlplane
 #Prevent Kubernetes from trying to pull from a remote registry
 kubectl patch deployment idp-controlplane \
   -p '{"spec":{"template":{"spec":{"containers":[{"name":"idp-controlplane","imagePullPolicy":"IfNotPresent"}]}}}}'
