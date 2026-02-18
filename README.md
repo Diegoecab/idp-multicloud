@@ -1413,6 +1413,14 @@ docker build -t idp-controlplane:latest .
 kubectl create deployment idp-controlplane --image=idp-controlplane:latest
 kubectl expose deployment idp-controlplane --port=8080
 
+#If deployment already exists
+kubectl set image deployment/idp-controlplane idp-controlplane=idp-controlplane:latest
+kubectl rollout status deployment/idp-controlplane
+#Prevent Kubernetes from trying to pull from a remote registry
+kubectl patch deployment idp-controlplane \
+  -p '{"spec":{"template":{"spec":{"containers":[{"name":"idp-controlplane","imagePullPolicy":"IfNotPresent"}]}}}}'
+
+
 # The control plane needs RBAC to manage MySQLInstanceClaims
 kubectl apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1444,6 +1452,12 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 EOF
 ```
+
+# To Access Control Plane API
+# Use port-forward
+kubectl port-forward svc/idp-controlplane 8080:8080
+
+
 
 ### End-to-End Verification
 
