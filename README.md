@@ -932,6 +932,15 @@ Delete a feature flag.
 - Python 3.10+
 - pip
 
+### Key Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `flask` | >= 3.0.0 | HTTP API framework |
+| `kubernetes` | >= 28.0.0 | Kubernetes client (optional — standalone mode works without it) |
+| `pyyaml` | >= 6.0 | YAML parsing |
+| `pytest` | >= 7.0.0 | Test framework |
+
 ### Install dependencies
 
 ```bash
