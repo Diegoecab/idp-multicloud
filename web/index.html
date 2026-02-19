@@ -257,6 +257,10 @@
 
     <div class="nav-section">
       <div class="nav-section-title">Admin</div>
+      <div class="nav-item" data-page="admin-credentials">
+        <span class="nav-icon">&#128273;</span>
+        <span>Credentials</span>
+      </div>
       <div class="nav-item" data-page="admin-providers">
         <span class="nav-icon">&#9881;</span>
         <span>Cloud Providers</span>
@@ -268,6 +272,10 @@
       <div class="nav-item" data-page="admin-config">
         <span class="nav-icon">&#8942;</span>
         <span>Platform Config</span>
+      </div>
+      <div class="nav-item" data-page="admin-audit">
+        <span class="nav-icon">&#128220;</span>
+        <span>Audit Log</span>
       </div>
       <div class="nav-item" data-page="admin-sagas">
         <span class="nav-icon">&#8634;</span>
@@ -463,11 +471,25 @@
       <div id="flags-content"></div>
     </div>
 
+    <!-- ── Admin: Credentials ── -->
+    <div id="page-admin-credentials" class="page">
+      <h2 class="page-title">Provider Credentials</h2>
+      <p class="page-subtitle">Configure cloud provider authentication. Credentials are required before provisioning.</p>
+      <div id="admin-credentials-content"></div>
+    </div>
+
     <!-- ── Admin: Cloud Providers ── -->
     <div id="page-admin-providers" class="page">
       <h2 class="page-title">Cloud Provider Configuration</h2>
       <p class="page-subtitle">Configure cloud provider connectivity and credentials</p>
       <div id="admin-providers-content"></div>
+    </div>
+
+    <!-- ── Admin: Audit Log ── -->
+    <div id="page-admin-audit" class="page">
+      <h2 class="page-title">Audit Log</h2>
+      <p class="page-subtitle">Complete history of all provisioning requests and actions</p>
+      <div id="admin-audit-content"></div>
     </div>
 
     <!-- ── Admin: DR Policies ── -->
@@ -1237,6 +1259,281 @@
       } catch(e) { alert("Error: " + e.message); }
     }
 
+    // ═══ ADMIN: AUDIT LOG ═══
+    async function loadAdminAudit() {
+      var container = document.getElementById("admin-audit-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/audit-log?limit=100");
+        var data = await resp.json();
+        var entries = data.entries || [];
+
+        var html = '';
+
+        // Filters
+        html += '<div class="panel" style="margin-bottom:1rem;">' +
+          '<div class="row">' +
+            '<div><label>Filter by Action</label><select id="audit-filter-action" onchange="filterAudit()">' +
+            '<option value="">All</option><option value="create_service">create_service</option>' +
+            '<option value="create_mysql">create_mysql</option><option value="failover">failover</option>' +
+            '<option value="multicloud_deploy">multicloud_deploy</option></select></div>' +
+            '<div><label>Filter by Product</label><select id="audit-filter-product" onchange="filterAudit()">' +
+            '<option value="">All</option><option value="mysql">mysql</option>' +
+            '<option value="webapp">webapp</option><option value="postgresql">postgresql</option></select></div>' +
+            '<div style="display:flex;align-items:flex-end;"><button class="secondary" style="margin-bottom:0.85rem;" onclick="loadAdminAudit()">Refresh</button></div>' +
+          '</div></div>';
+
+        if (entries.length === 0) {
+          html += '<div class="panel"><p style="color:#64748b;">No audit log entries yet. Create a service to see activity.</p></div>';
+        } else {
+          html += '<table id="audit-table"><thead><tr>' +
+            '<th>Time</th><th>Action</th><th>Product</th><th>Resource</th>' +
+            '<th>Provider</th><th>Status</th><th>Duration</th><th>Error</th>' +
+            '</tr></thead><tbody>';
+          entries.forEach(function(e) {
+            var ts = new Date(e.timestamp * 1000);
+            var timeStr = ts.toLocaleString();
+            var isErr = e.response_status >= 400 || e.error;
+            var statusCls = isErr ? 'unhealthy' : 'healthy';
+            var durationStr = e.duration_ms ? e.duration_ms.toFixed(0) + 'ms' : '-';
+            var resource = e.namespace && e.name ? e.namespace + '/' + e.name : '-';
+            html += '<tr data-action="' + (e.action || '') + '" data-product="' + (e.product || '') + '">' +
+              '<td style="font-size:0.72rem;white-space:nowrap;">' + timeStr + '</td>' +
+              '<td><span style="background:#1e3a5f;color:#38bdf8;padding:0.15rem 0.4rem;border-radius:3px;font-size:0.7rem;">' + e.action + '</span></td>' +
+              '<td>' + (e.product || '-') + '</td>' +
+              '<td style="font-family:monospace;font-size:0.72rem;">' + resource + '</td>' +
+              '<td>' + (e.provider ? e.provider.toUpperCase() : '-') + '</td>' +
+              '<td><span class="health-dot ' + statusCls + '"></span>' + e.response_status + '</td>' +
+              '<td>' + durationStr + '</td>' +
+              '<td style="font-size:0.7rem;color:#f87171;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' +
+                (e.error || '').replace(/"/g, '&quot;') + '">' + (e.error || '-') + '</td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    function filterAudit() {
+      var action = document.getElementById("audit-filter-action").value;
+      var product = document.getElementById("audit-filter-product").value;
+      var rows = document.querySelectorAll("#audit-table tbody tr");
+      rows.forEach(function(row) {
+        var matchAction = !action || row.getAttribute("data-action") === action;
+        var matchProduct = !product || row.getAttribute("data-product") === product;
+        row.style.display = (matchAction && matchProduct) ? "" : "none";
+      });
+    }
+
+    // ═══ ADMIN: CREDENTIALS ═══
+    async function loadAdminCredentials() {
+      var container = document.getElementById("admin-credentials-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/credentials");
+        var data = await resp.json();
+        var creds = data.credentials || [];
+
+        // Also fetch provider configs to show all providers
+        var provResp = await fetch(API + "/api/admin/providers");
+        var provData = await provResp.json();
+        var providers = provData.providers || [];
+
+        var html = '';
+
+        // Status overview
+        html += '<div class="stats-grid" style="margin-bottom:1.5rem;">';
+        providers.forEach(function(p) {
+          var cred = creds.find(function(c) { return c.provider === p.name; });
+          var hasCred = cred && cred.has_credentials;
+          var validated = cred && cred.validated;
+          var statusText = !hasCred ? 'NOT CONFIGURED' : (validated ? 'VALIDATED' : 'NOT VALIDATED');
+          var statusColor = !hasCred ? '#f87171' : (validated ? '#4ade80' : '#fbbf24');
+          html += '<div class="stat-card">' +
+            '<div class="stat-label">' + p.display_name + '</div>' +
+            '<div class="stat-value" style="font-size:1rem;color:' + statusColor + ';">' + statusText + '</div>' +
+            '<div class="stat-sub">' + (cred ? cred.cred_type : 'none') + '</div>' +
+            '</div>';
+        });
+        html += '</div>';
+
+        // Credential details per provider
+        providers.forEach(function(p) {
+          var cred = creds.find(function(c) { return c.provider === p.name; });
+          var hasCred = cred && cred.has_credentials;
+          var validated = cred && cred.validated;
+          var statusDot = !hasCred ? 'unhealthy' : (validated ? 'healthy' : '');
+
+          html += '<div class="panel">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">' +
+            '<h3 style="color:#f1f5f9;font-size:1rem;">' +
+              '<span class="health-dot ' + statusDot + '"' + (!hasCred || validated ? '' : ' style="background:#fbbf24;"') + '></span>' +
+              p.display_name + ' (' + p.name + ')' +
+            '</h3>' +
+            '<div style="display:flex;gap:0.5rem;">';
+          if (hasCred) {
+            html += '<button class="primary" style="font-size:0.7rem;padding:0.3rem 0.75rem;" ' +
+              'onclick="validateCred(\'' + p.name + '\')">Validate</button>';
+            html += '<button class="secondary" style="font-size:0.7rem;padding:0.3rem 0.75rem;" ' +
+              'onclick="viewCredMasked(\'' + p.name + '\')">View (masked)</button>';
+            html += '<button class="secondary" style="font-size:0.7rem;padding:0.3rem 0.75rem;color:#f87171;border-color:#f87171;" ' +
+              'onclick="deleteCred(\'' + p.name + '\')">Delete</button>';
+          }
+          html += '</div></div>';
+
+          if (hasCred) {
+            html += '<table style="font-size:0.78rem;">' +
+              '<tr><td style="color:#64748b;width:150px;">Type</td><td>' + cred.cred_type + '</td></tr>' +
+              '<tr><td style="color:#64748b;">Validated</td><td>' + (validated ? 'Yes' : 'No') + '</td></tr>' +
+              '<tr><td style="color:#64748b;">Updated</td><td>' + new Date((cred.updated_at || 0) * 1000).toLocaleString() + '</td></tr>' +
+              '</table>';
+          } else {
+            html += '<p style="font-size:0.8rem;color:#f87171;margin-bottom:0.5rem;">No credentials configured. Provisioning to this provider will be blocked.</p>';
+          }
+
+          // Inline credential form
+          html += '<div id="cred-masked-' + p.name + '" style="margin-top:0.5rem;"></div>';
+          html += '<details style="margin-top:0.75rem;"><summary style="cursor:pointer;color:#38bdf8;font-size:0.8rem;">Set Credentials</summary>';
+          html += '<div style="margin-top:0.75rem;">';
+          html += buildCredForm(p.name);
+          html += '</div></details>';
+          html += '</div>';
+        });
+
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    function buildCredForm(provider) {
+      var html = '';
+      if (provider === 'aws') {
+        html += '<label>Credential Type</label>' +
+          '<select id="cred-type-' + provider + '">' +
+          '<option value="access_key">Access Key</option>' +
+          '<option value="irsa">IRSA (no secret needed)</option></select>';
+        html += '<div id="cred-fields-' + provider + '">' +
+          '<label>AWS Access Key ID</label>' +
+          '<input type="text" id="cred-aws-key-' + provider + '" placeholder="AKIAIOSFODNN7EXAMPLE">' +
+          '<label>AWS Secret Access Key</label>' +
+          '<input type="password" id="cred-aws-secret-' + provider + '" placeholder="wJalrXUtnFEMI/K7MDENG/...">' +
+          '<label>Region (optional)</label>' +
+          '<input type="text" id="cred-aws-region-' + provider + '" placeholder="us-east-1">' +
+          '</div>';
+      } else if (provider === 'gcp') {
+        html += '<label>Credential Type</label>' +
+          '<select id="cred-type-' + provider + '">' +
+          '<option value="service_account">Service Account JSON</option>' +
+          '<option value="workload_identity">Workload Identity (no secret needed)</option></select>';
+        html += '<div id="cred-fields-' + provider + '">' +
+          '<label>Project ID</label>' +
+          '<input type="text" id="cred-gcp-project-' + provider + '" placeholder="my-project-123">' +
+          '<label>Client Email</label>' +
+          '<input type="text" id="cred-gcp-email-' + provider + '" placeholder="sa@project.iam.gserviceaccount.com">' +
+          '<label>Private Key</label>' +
+          '<textarea id="cred-gcp-key-' + provider + '" rows="3" style="width:100%;background:#0f172a;border:1px solid #475569;border-radius:4px;color:#e2e8f0;font-size:0.8rem;padding:0.5rem;margin-bottom:0.85rem;font-family:monospace;" placeholder="-----BEGIN PRIVATE KEY-----..."></textarea>' +
+          '</div>';
+      } else if (provider === 'oci') {
+        html += '<label>Credential Type</label>' +
+          '<select id="cred-type-' + provider + '">' +
+          '<option value="api_key">API Key</option>' +
+          '<option value="instance_principal">Instance Principal (no secret needed)</option></select>';
+        html += '<div id="cred-fields-' + provider + '">' +
+          '<label>Tenancy OCID</label>' +
+          '<input type="text" id="cred-oci-tenancy-' + provider + '" placeholder="ocid1.tenancy.oc1..">' +
+          '<label>User OCID</label>' +
+          '<input type="text" id="cred-oci-user-' + provider + '" placeholder="ocid1.user.oc1..">' +
+          '<label>Fingerprint</label>' +
+          '<input type="text" id="cred-oci-fingerprint-' + provider + '" placeholder="aa:bb:cc:...">' +
+          '<label>Private Key</label>' +
+          '<textarea id="cred-oci-key-' + provider + '" rows="3" style="width:100%;background:#0f172a;border:1px solid #475569;border-radius:4px;color:#e2e8f0;font-size:0.8rem;padding:0.5rem;margin-bottom:0.85rem;font-family:monospace;" placeholder="-----BEGIN RSA PRIVATE KEY-----..."></textarea>' +
+          '</div>';
+      } else {
+        html += '<label>Credential Type</label>' +
+          '<input type="text" id="cred-type-' + provider + '" placeholder="access_key">' +
+          '<label>Credentials JSON</label>' +
+          '<textarea id="cred-generic-' + provider + '" rows="4" style="width:100%;background:#0f172a;border:1px solid #475569;border-radius:4px;color:#e2e8f0;font-size:0.8rem;padding:0.5rem;margin-bottom:0.85rem;font-family:monospace;" placeholder=\'{"key": "value"}\'></textarea>';
+      }
+      html += '<button class="primary" style="font-size:0.8rem;" onclick="saveCred(\'' + provider + '\')">Save Credentials</button>';
+      return html;
+    }
+
+    async function saveCred(provider) {
+      var credType = document.getElementById("cred-type-" + provider).value;
+      var credData = {};
+
+      if (provider === 'aws' && credType === 'access_key') {
+        credData.aws_access_key_id = (document.getElementById("cred-aws-key-" + provider) || {}).value || '';
+        credData.aws_secret_access_key = (document.getElementById("cred-aws-secret-" + provider) || {}).value || '';
+        var awsRegion = (document.getElementById("cred-aws-region-" + provider) || {}).value || '';
+        if (awsRegion) credData.region = awsRegion;
+      } else if (provider === 'gcp' && credType === 'service_account') {
+        credData.project_id = (document.getElementById("cred-gcp-project-" + provider) || {}).value || '';
+        credData.client_email = (document.getElementById("cred-gcp-email-" + provider) || {}).value || '';
+        credData.private_key = (document.getElementById("cred-gcp-key-" + provider) || {}).value || '';
+      } else if (provider === 'oci' && credType === 'api_key') {
+        credData.tenancy_ocid = (document.getElementById("cred-oci-tenancy-" + provider) || {}).value || '';
+        credData.user_ocid = (document.getElementById("cred-oci-user-" + provider) || {}).value || '';
+        credData.fingerprint = (document.getElementById("cred-oci-fingerprint-" + provider) || {}).value || '';
+        credData.private_key = (document.getElementById("cred-oci-key-" + provider) || {}).value || '';
+      } else if (credType === 'irsa' || credType === 'workload_identity' || credType === 'instance_principal') {
+        credData.method = credType;
+        credData.configured = true;
+      } else {
+        try {
+          credData = JSON.parse((document.getElementById("cred-generic-" + provider) || {}).value || '{}');
+        } catch(e) { alert("Invalid JSON"); return; }
+      }
+
+      try {
+        var resp = await fetch(API + "/api/admin/credentials", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: provider, cred_type: credType, cred_data: credData })
+        });
+        var result = await resp.json();
+        if (resp.ok) {
+          alert("Credentials saved for " + provider + ". Please validate.");
+          loadAdminCredentials();
+        } else {
+          alert("Error: " + (result.error || "Unknown error"));
+        }
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function validateCred(provider) {
+      try {
+        var resp = await fetch(API + "/api/admin/credentials/" + provider + "/validate", { method: "POST" });
+        var result = await resp.json();
+        if (result.valid) {
+          alert("Credentials for " + provider + " are valid!");
+        } else {
+          alert("Validation failed:\n" + (result.errors || []).join("\n"));
+        }
+        loadAdminCredentials();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function viewCredMasked(provider) {
+      try {
+        var resp = await fetch(API + "/api/admin/credentials/" + provider);
+        var data = await resp.json();
+        var el = document.getElementById("cred-masked-" + provider);
+        el.innerHTML = '<pre class="result status-ok">' + JSON.stringify(data.credentials, null, 2) + '</pre>';
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function deleteCred(provider) {
+      if (!confirm("Delete credentials for '" + provider + "'? Provisioning to this provider will be blocked.")) return;
+      try {
+        await fetch(API + "/api/admin/credentials/" + provider, { method: "DELETE" });
+        loadAdminCredentials();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
     // ═══ ADMIN: SAGA HISTORY ═══
     async function loadAdminSagas() {
       var container = document.getElementById("admin-sagas-content");
@@ -1318,9 +1615,11 @@
 
     // ═══ EXTENDED NAVIGATION ═══
     function navigateToExtended(page) {
+      if (page === "admin-credentials") loadAdminCredentials();
       if (page === "admin-providers") loadAdminProviders();
       if (page === "admin-dr") loadAdminDR();
       if (page === "admin-config") loadAdminConfig();
+      if (page === "admin-audit") loadAdminAudit();
       if (page === "admin-sagas") loadAdminSagas();
       if (page === "admin-placements") loadAdminPlacements();
     }

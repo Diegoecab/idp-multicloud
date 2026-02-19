@@ -20,10 +20,15 @@ Endpoints:
   GET  /api/admin/placements                       — List placement history
   GET  /api/admin/placements/<id>                  — Get placement detail
 
-  POST /api/services/<product>/multicloud          — Deploy to multiple clouds
+  GET  /api/admin/audit-log                        — List audit log entries
+  GET  /api/admin/credentials                      — List provider credentials (masked)
+  POST /api/admin/credentials                      — Save provider credentials
+  DELETE /api/admin/credentials/<provider>         — Delete provider credentials
+  POST /api/admin/credentials/<provider>/validate  — Validate provider credentials
 """
 
 import logging
+import re
 
 from flask import Blueprint, request, jsonify
 
@@ -34,6 +39,10 @@ from internal.db.database import (
     get_dr_policies, get_dr_policy, save_dr_policy, delete_dr_policy,
     list_sagas, get_saga, update_saga,
     list_placements, get_placement_by_id,
+    list_audit_log,
+    save_provider_credentials, get_provider_credentials,
+    get_all_provider_credentials, delete_provider_credentials,
+    mark_credentials_validated,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,3 +197,179 @@ def get_placement_detail(placement_id: int):
     if not p:
         return jsonify({"error": "Placement not found"}), 404
     return jsonify({"placement": p}), 200
+
+
+# ── Audit Log ───────────────────────────────────────────────────────────────
+
+@admin_bp.route("/api/admin/audit-log", methods=["GET"])
+def get_audit_log():
+    """Return the audit log with optional filters."""
+    action = request.args.get("action")
+    product = request.args.get("product")
+    limit = int(request.args.get("limit", 100))
+    return jsonify({
+        "entries": list_audit_log(limit=limit, action=action, product=product),
+    }), 200
+
+
+# ── Provider Credentials ────────────────────────────────────────────────────
+
+def _mask_value(value: str) -> str:
+    """Mask a credential value, showing only last 4 chars."""
+    if not value or len(value) <= 4:
+        return "****"
+    return "*" * (len(value) - 4) + value[-4:]
+
+
+def _mask_credentials(cred_data: dict) -> dict:
+    """Return a masked copy of credentials for safe display."""
+    masked = {}
+    for key, value in cred_data.items():
+        if isinstance(value, str) and any(
+            s in key.lower()
+            for s in ("key", "secret", "password", "token", "credential")
+        ):
+            masked[key] = _mask_value(value)
+        elif isinstance(value, str) and len(value) > 20:
+            masked[key] = _mask_value(value)
+        else:
+            masked[key] = value
+    return masked
+
+
+@admin_bp.route("/api/admin/credentials", methods=["GET"])
+def list_credentials():
+    """List all provider credentials (summary only, no secrets)."""
+    return jsonify({"credentials": get_all_provider_credentials()}), 200
+
+
+@admin_bp.route("/api/admin/credentials/<provider>", methods=["GET"])
+def get_credentials(provider: str):
+    """Get credentials for a specific provider (masked)."""
+    cred = get_provider_credentials(provider)
+    if not cred:
+        return jsonify({"error": f"No credentials for provider '{provider}'"}), 404
+    cred["cred_data"] = _mask_credentials(cred["cred_data"])
+    return jsonify({"credentials": cred}), 200
+
+
+@admin_bp.route("/api/admin/credentials", methods=["POST"])
+def save_credentials():
+    """Save credentials for a cloud provider.
+
+    Request body:
+      {
+        "provider": "aws",
+        "cred_type": "access_key",
+        "cred_data": {
+          "aws_access_key_id": "AKIA...",
+          "aws_secret_access_key": "wJal..."
+        }
+      }
+
+    Supported cred_types:
+      - access_key: AWS-style access key + secret key
+      - service_account: GCP service account JSON
+      - api_key: OCI API key
+      - irsa: IAM Roles for Service Accounts (no stored secret)
+      - workload_identity: GCP Workload Identity (no stored secret)
+      - instance_principal: OCI Instance Principal (no stored secret)
+    """
+    body = request.get_json(silent=True)
+    if body is None:
+        return jsonify({"error": "Request body must be valid JSON"}), 400
+    if "provider" not in body:
+        return jsonify({"error": "'provider' is required"}), 400
+    if "cred_data" not in body:
+        return jsonify({"error": "'cred_data' is required"}), 400
+
+    provider = body["provider"]
+    cred_type = body.get("cred_type", "access_key")
+    cred_data = body["cred_data"]
+
+    if not isinstance(cred_data, dict):
+        return jsonify({"error": "'cred_data' must be a JSON object"}), 400
+
+    save_provider_credentials(provider, cred_type, cred_data)
+    logger.info("Credentials saved for provider '%s' (type: %s)", provider, cred_type)
+
+    return jsonify({
+        "status": "saved",
+        "provider": provider,
+        "cred_type": cred_type,
+        "message": f"Credentials for '{provider}' saved. Run validation to verify.",
+    }), 200
+
+
+@admin_bp.route("/api/admin/credentials/<provider>", methods=["DELETE"])
+def remove_credentials(provider: str):
+    """Delete credentials for a provider."""
+    if delete_provider_credentials(provider):
+        return jsonify({"status": "deleted", "provider": provider}), 200
+    return jsonify({"error": f"No credentials for provider '{provider}'"}), 404
+
+
+@admin_bp.route("/api/admin/credentials/<provider>/validate", methods=["POST"])
+def validate_credentials(provider: str):
+    """Validate provider credentials by running a lightweight check.
+
+    For now this checks structure (required fields present).
+    In production this would call the actual cloud API (e.g., STS GetCallerIdentity).
+    """
+    cred = get_provider_credentials(provider)
+    if not cred:
+        return jsonify({
+            "valid": False,
+            "provider": provider,
+            "error": "No credentials configured for this provider",
+        }), 404
+
+    cred_data = cred["cred_data"]
+    cred_type = cred["cred_type"]
+    errors = []
+
+    if provider == "aws":
+        if cred_type == "access_key":
+            if not cred_data.get("aws_access_key_id"):
+                errors.append("Missing 'aws_access_key_id'")
+            elif not re.match(r"^AKI[A-Z0-9]{13,}$", cred_data["aws_access_key_id"]):
+                errors.append("'aws_access_key_id' does not match expected format (AKIA...)")
+            if not cred_data.get("aws_secret_access_key"):
+                errors.append("Missing 'aws_secret_access_key'")
+        elif cred_type not in ("irsa",):
+            errors.append(f"Unsupported cred_type '{cred_type}' for AWS")
+
+    elif provider == "gcp":
+        if cred_type == "service_account":
+            if not cred_data.get("project_id"):
+                errors.append("Missing 'project_id'")
+            if not cred_data.get("client_email"):
+                errors.append("Missing 'client_email'")
+            if not cred_data.get("private_key"):
+                errors.append("Missing 'private_key'")
+        elif cred_type not in ("workload_identity",):
+            errors.append(f"Unsupported cred_type '{cred_type}' for GCP")
+
+    elif provider == "oci":
+        if cred_type == "api_key":
+            if not cred_data.get("tenancy_ocid"):
+                errors.append("Missing 'tenancy_ocid'")
+            if not cred_data.get("user_ocid"):
+                errors.append("Missing 'user_ocid'")
+            if not cred_data.get("fingerprint"):
+                errors.append("Missing 'fingerprint'")
+            if not cred_data.get("private_key"):
+                errors.append("Missing 'private_key'")
+        elif cred_type not in ("instance_principal",):
+            errors.append(f"Unsupported cred_type '{cred_type}' for OCI")
+
+    is_valid = len(errors) == 0
+    mark_credentials_validated(provider, is_valid)
+
+    return jsonify({
+        "valid": is_valid,
+        "provider": provider,
+        "cred_type": cred_type,
+        "errors": errors if errors else None,
+        "message": "Credentials validated successfully" if is_valid else "Validation failed",
+    }), 200 if is_valid else 422

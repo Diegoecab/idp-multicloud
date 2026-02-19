@@ -17,6 +17,7 @@ Endpoints:
 
 import json
 import logging
+import time
 
 from flask import Blueprint, request, jsonify
 
@@ -39,6 +40,7 @@ from internal.scheduler.experiments import (
 )
 from internal.k8s.claim_builder import build_claim
 from internal.k8s import client as k8s
+from internal.db.database import append_audit_log, provider_has_credentials, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -125,10 +127,41 @@ def create_mysql():
         }), 200
 
     # Run the scheduler
+    t0 = time.time()
     try:
         placement = schedule(req)
     except ValueError as e:
+        append_audit_log(
+            action="create_mysql", product="mysql",
+            name=req.name, namespace=req.namespace,
+            source_ip=request.remote_addr, method="POST", path=request.path,
+            request_body=body, response_status=422,
+            error=str(e),
+            duration_ms=(time.time() - t0) * 1000,
+        )
         return jsonify({"error": str(e)}), 422
+
+    # Check provider credentials if validation is enabled
+    if get_config("credential_validation_enabled", "true") == "true":
+        if not provider_has_credentials(placement.provider):
+            error_msg = (
+                f"Provider '{placement.provider}' has no credentials configured. "
+                "Set credentials in Admin > Credentials before provisioning."
+            )
+            append_audit_log(
+                action="create_mysql", product="mysql",
+                name=req.name, namespace=req.namespace,
+                source_ip=request.remote_addr, method="POST", path=request.path,
+                request_body=body, response_status=422,
+                provider=placement.provider, region=placement.region,
+                error=error_msg,
+                duration_ms=(time.time() - t0) * 1000,
+            )
+            return jsonify({
+                "error": error_msg,
+                "provider": placement.provider,
+                "hint": "Use POST /api/admin/credentials to configure credentials",
+            }), 422
 
     # Record success on the provider's circuit breaker
     cb = get_circuit_breaker(placement.provider)
@@ -152,6 +185,8 @@ def create_mysql():
         # Record failure on the provider's circuit breaker
         cb.record_failure()
 
+    duration_ms = (time.time() - t0) * 1000
+
     response = {
         "status": "created",
         "sticky": False,
@@ -171,6 +206,22 @@ def create_mysql():
         response["apply_warning"] = apply_error
     if placement.failover:
         response["failover"] = placement.failover
+
+    append_audit_log(
+        action="create_mysql", product="mysql",
+        name=req.name, namespace=req.namespace,
+        source_ip=request.remote_addr, method="POST", path=request.path,
+        request_body=body, response_status=201,
+        response_summary={
+            "status": "created",
+            "provider": placement.provider,
+            "region": placement.region,
+            "applied": applied,
+        },
+        provider=placement.provider, region=placement.region,
+        error=apply_error,
+        duration_ms=duration_ms,
+    )
 
     return jsonify(response), 201
 

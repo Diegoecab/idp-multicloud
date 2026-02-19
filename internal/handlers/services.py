@@ -10,6 +10,7 @@ Endpoints:
 
 import json
 import logging
+import time
 
 from flask import Blueprint, request, jsonify
 
@@ -25,6 +26,7 @@ from internal.orchestration.saga import SagaOrchestrator, MultiCloudDeployer
 from internal.db.database import (
     get_config, get_placement, record_placement,
     get_saga_by_resource, get_dr_policy,
+    append_audit_log, provider_has_credentials,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,13 +110,37 @@ def create_service(product_name: str):
         }), 200
 
     # Execute via Saga orchestrator
+    t0 = time.time()
     saga = SagaOrchestrator(product_name, body)
     result = saga.execute()
+    duration_ms = (time.time() - t0) * 1000
 
-    if result.get("status") == "failed":
-        return jsonify(result), 422
+    status_code = 422 if result.get("status") == "failed" else 201
 
-    return jsonify(result), 201
+    # Audit log
+    append_audit_log(
+        action="create_service",
+        product=product_name,
+        name=body.get("name", ""),
+        namespace=body.get("namespace", "default"),
+        source_ip=request.remote_addr,
+        method="POST",
+        path=request.path,
+        request_body=body,
+        response_status=status_code,
+        response_summary={
+            "status": result.get("status"),
+            "saga_id": result.get("saga_id"),
+            "provider": result.get("placement", {}).get("provider"),
+            "region": result.get("placement", {}).get("region"),
+        },
+        provider=result.get("placement", {}).get("provider"),
+        region=result.get("placement", {}).get("region"),
+        error=result.get("error"),
+        duration_ms=duration_ms,
+    )
+
+    return jsonify(result), status_code
 
 
 @services_bp.route("/api/services/<product_name>/<namespace>/<name>", methods=["GET"])
@@ -277,6 +303,26 @@ def force_service_failover(product_name: str, namespace: str, name: str):
         response["apply_warning"] = apply_error
     if placement.failover:
         response["failover"] = placement.failover
+
+    append_audit_log(
+        action="failover",
+        product=product_name,
+        name=name,
+        namespace=namespace,
+        source_ip=request.remote_addr,
+        method="POST",
+        path=request.path,
+        request_body=body,
+        response_status=200,
+        response_summary={
+            "status": "failover_complete",
+            "previous_provider": current_provider,
+            "new_provider": placement.provider,
+            "new_region": placement.region,
+        },
+        provider=placement.provider,
+        region=placement.region,
+    )
 
     return jsonify(response), 200
 

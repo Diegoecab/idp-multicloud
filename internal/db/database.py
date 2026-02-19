@@ -6,6 +6,8 @@ Stores:
   - Experiments and feature flags
   - Provider health status
   - Saga execution state (resource lifecycle)
+  - Audit log (all API requests and provisioning events)
+  - Provider credentials (cloud provider authentication data)
 
 The database file defaults to 'idp.db' in the working directory.
 Set IDP_DB_PATH env var to override.
@@ -134,10 +136,42 @@ def init_db(db_path: Optional[str] = None):
             updated_at  REAL NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   REAL NOT NULL,
+            action      TEXT NOT NULL,
+            product     TEXT,
+            name        TEXT,
+            namespace   TEXT,
+            source_ip   TEXT,
+            method      TEXT NOT NULL DEFAULT 'POST',
+            path        TEXT NOT NULL DEFAULT '',
+            request_body TEXT NOT NULL DEFAULT '{}',
+            response_status INTEGER NOT NULL DEFAULT 200,
+            response_summary TEXT NOT NULL DEFAULT '{}',
+            provider    TEXT,
+            region      TEXT,
+            error       TEXT,
+            duration_ms REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_credentials (
+            provider    TEXT PRIMARY KEY,
+            cred_type   TEXT NOT NULL DEFAULT 'access_key',
+            cred_data   TEXT NOT NULL DEFAULT '{}',
+            validated   INTEGER NOT NULL DEFAULT 0,
+            validated_at REAL,
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_placements_name ON placements(namespace, name);
         CREATE INDEX IF NOT EXISTS idx_placements_product ON placements(product);
         CREATE INDEX IF NOT EXISTS idx_placements_status ON placements(status);
         CREATE INDEX IF NOT EXISTS idx_saga_state ON saga_executions(state);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
+        CREATE INDEX IF NOT EXISTS idx_audit_log_product ON audit_log(product);
     """)
     conn.commit()
 
@@ -588,3 +622,161 @@ def seed_defaults():
         set_config("saga_timeout_seconds", "300")
     if not get_config("multicloud_deploy_enabled"):
         set_config("multicloud_deploy_enabled", "true")
+    if not get_config("credential_validation_enabled"):
+        set_config("credential_validation_enabled", "true")
+
+
+# ── Audit Log ───────────────────────────────────────────────────────────────
+
+def append_audit_log(action: str, product: str = None, name: str = None,
+                     namespace: str = None, source_ip: str = None,
+                     method: str = "POST", path: str = "",
+                     request_body: dict = None, response_status: int = 200,
+                     response_summary: dict = None, provider: str = None,
+                     region: str = None, error: str = None,
+                     duration_ms: float = None) -> int:
+    conn = _get_conn()
+    cursor = conn.execute(
+        """INSERT INTO audit_log
+           (timestamp, action, product, name, namespace, source_ip,
+            method, path, request_body, response_status, response_summary,
+            provider, region, error, duration_ms)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (time.time(), action, product, name, namespace, source_ip,
+         method, path, json.dumps(request_body or {}), response_status,
+         json.dumps(response_summary or {}), provider, region, error,
+         duration_ms),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def list_audit_log(limit: int = 100, action: str = None,
+                   product: str = None) -> list[dict]:
+    conn = _get_conn()
+    query = "SELECT * FROM audit_log WHERE 1=1"
+    params = []
+    if action:
+        query += " AND action = ?"
+        params.append(action)
+    if product:
+        query += " AND product = ?"
+        params.append(product)
+    query += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    return [_row_to_audit(r) for r in rows]
+
+
+def _row_to_audit(r) -> dict:
+    return {
+        "id": r["id"],
+        "timestamp": r["timestamp"],
+        "action": r["action"],
+        "product": r["product"],
+        "name": r["name"],
+        "namespace": r["namespace"],
+        "source_ip": r["source_ip"],
+        "method": r["method"],
+        "path": r["path"],
+        "request_body": json.loads(r["request_body"]),
+        "response_status": r["response_status"],
+        "response_summary": json.loads(r["response_summary"]),
+        "provider": r["provider"],
+        "region": r["region"],
+        "error": r["error"],
+        "duration_ms": r["duration_ms"],
+    }
+
+
+# ── Provider Credentials ────────────────────────────────────────────────────
+
+def save_provider_credentials(provider: str, cred_type: str,
+                              cred_data: dict) -> None:
+    conn = _get_conn()
+    now = time.time()
+    existing = conn.execute(
+        "SELECT 1 FROM provider_credentials WHERE provider = ?", (provider,)
+    ).fetchone()
+    if existing:
+        conn.execute(
+            """UPDATE provider_credentials
+               SET cred_type = ?, cred_data = ?, validated = 0,
+                   validated_at = NULL, updated_at = ?
+               WHERE provider = ?""",
+            (cred_type, json.dumps(cred_data), now, provider),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO provider_credentials
+               (provider, cred_type, cred_data, validated, created_at, updated_at)
+               VALUES (?, ?, ?, 0, ?, ?)""",
+            (provider, cred_type, json.dumps(cred_data), now, now),
+        )
+    conn.commit()
+
+
+def get_provider_credentials(provider: str) -> Optional[dict]:
+    conn = _get_conn()
+    r = conn.execute(
+        "SELECT * FROM provider_credentials WHERE provider = ?", (provider,)
+    ).fetchone()
+    if not r:
+        return None
+    return {
+        "provider": r["provider"],
+        "cred_type": r["cred_type"],
+        "cred_data": json.loads(r["cred_data"]),
+        "validated": bool(r["validated"]),
+        "validated_at": r["validated_at"],
+        "created_at": r["created_at"],
+        "updated_at": r["updated_at"],
+    }
+
+
+def get_all_provider_credentials() -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT * FROM provider_credentials ORDER BY provider"
+    ).fetchall()
+    result = []
+    for r in rows:
+        data = json.loads(r["cred_data"])
+        result.append({
+            "provider": r["provider"],
+            "cred_type": r["cred_type"],
+            "has_credentials": bool(data),
+            "validated": bool(r["validated"]),
+            "validated_at": r["validated_at"],
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        })
+    return result
+
+
+def mark_credentials_validated(provider: str, valid: bool):
+    conn = _get_conn()
+    conn.execute(
+        """UPDATE provider_credentials
+           SET validated = ?, validated_at = ?, updated_at = ?
+           WHERE provider = ?""",
+        (int(valid), time.time(), time.time(), provider),
+    )
+    conn.commit()
+
+
+def delete_provider_credentials(provider: str) -> bool:
+    conn = _get_conn()
+    cursor = conn.execute(
+        "DELETE FROM provider_credentials WHERE provider = ?", (provider,)
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def provider_has_credentials(provider: str) -> bool:
+    """Check if a provider has credentials configured (non-empty)."""
+    cred = get_provider_credentials(provider)
+    if not cred:
+        return False
+    return bool(cred["cred_data"])

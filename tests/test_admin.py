@@ -17,6 +17,8 @@ def temp_db():
     from internal.db import database
     database.init_db(path)
     database.seed_defaults()
+    for prov in ("aws", "gcp", "oci"):
+        database.save_provider_credentials(prov, "access_key", {"test": True})
     yield path
     os.unlink(path)
 

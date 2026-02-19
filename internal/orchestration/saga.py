@@ -26,6 +26,7 @@ import time
 from internal.db.database import (
     create_saga, update_saga, get_saga, get_config,
     record_placement, update_placement_status,
+    provider_has_credentials,
 )
 from internal.models.types import ServiceRequest
 from internal.products.registry import (
@@ -107,8 +108,17 @@ class SagaOrchestrator:
             raise ValueError(f"Validation failed: {errors}")
 
     def _step_schedule(self):
-        """Step 2: Run the scheduler."""
+        """Step 2: Run the scheduler and verify provider credentials."""
         self.placement = schedule(self.svc_req)
+
+        # Check provider credentials if validation is enabled
+        if get_config("credential_validation_enabled", "true") == "true":
+            if not provider_has_credentials(self.placement.provider):
+                raise ValueError(
+                    f"Provider '{self.placement.provider}' has no credentials configured. "
+                    "Set credentials in Admin > Credentials before provisioning."
+                )
+
         cb = get_circuit_breaker(self.placement.provider)
         cb.record_success()
 
