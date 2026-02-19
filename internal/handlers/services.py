@@ -2,9 +2,10 @@
 
 Endpoints:
   GET  /api/products                                    — List registered products
-  POST /api/services/<product>                          — Create a service instance
+  POST /api/services/<product>                          — Create a service instance (via saga)
   GET  /api/services/<product>/<ns>/<name>              — Query status
   POST /api/services/<product>/<ns>/<name>/failover     — Force failover
+  POST /api/services/<product>/multicloud               — Deploy to multiple clouds
 """
 
 import json
@@ -20,6 +21,11 @@ from internal.scheduler.scheduler import (
     schedule, get_circuit_breaker, CANDIDATES,
 )
 from internal.k8s import client as k8s
+from internal.orchestration.saga import SagaOrchestrator, MultiCloudDeployer
+from internal.db.database import (
+    get_config, get_placement, record_placement,
+    get_saga_by_resource, get_dr_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +45,9 @@ def get_products():
 def create_service(product_name: str):
     """Create a service instance for any registered product.
 
-    The developer provides cell, tier, environment, ha, and product-specific
-    parameters. The control plane decides provider, region, and network.
+    Uses the Saga orchestrator for multi-step provisioning with
+    automatic compensation (rollback) on failure. The saga tracks:
+    validate -> schedule -> apply_claim -> wait_ready -> register -> notify
     """
     product = get_product(product_name)
     if product is None:
@@ -63,33 +70,15 @@ def create_service(product_name: str):
             ),
         }), 400
 
-    # Validate common fields
-    svc_req = ServiceRequest(
-        product=product_name,
-        cell=body.get("cell", ""),
-        tier=body.get("tier", ""),
-        environment=body.get("environment", ""),
-        ha=body.get("ha", False),
-        namespace=body.get("namespace", "default"),
-        name=body.get("name", ""),
-    )
-    errors = svc_req.validate()
-
-    # Validate product-specific parameters
-    errors.extend(validate_product_params(product, body))
-
-    if errors:
-        return jsonify({"error": "Validation failed", "details": errors}), 400
-
-    # Sticky placement check
+    # Sticky placement check (before starting saga)
     existing = None
     try:
         existing = k8s.get_claim_generic(
             product.api_version, product.kind,
-            svc_req.namespace, svc_req.name,
+            body.get("namespace", "default"), body.get("name", ""),
         )
     except RuntimeError:
-        pass  # K8s not available — skip sticky check
+        pass
     except Exception as e:
         logger.error("Error during sticky check: %s", e)
 
@@ -114,95 +103,71 @@ def create_service(product_name: str):
                 "network": spec_params.get("network", {}),
             },
             "reason": reason,
-            "namespace": svc_req.namespace,
-            "name": svc_req.name,
+            "namespace": body.get("namespace", "default"),
+            "name": body.get("name", ""),
         }), 200
 
-    # Run the scheduler
-    try:
-        placement = schedule(svc_req)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 422
+    # Execute via Saga orchestrator
+    saga = SagaOrchestrator(product_name, body)
+    result = saga.execute()
 
-    # Record success on circuit breaker
-    cb = get_circuit_breaker(placement.provider)
-    cb.record_success()
+    if result.get("status") == "failed":
+        return jsonify(result), 422
 
-    # Build claim via product registry
-    claim = build_product_claim(product, body, placement)
-
-    # Attempt to apply
-    applied = False
-    apply_error = None
-    try:
-        k8s.apply_claim_generic(product.api_version, product.kind, claim)
-        applied = True
-    except RuntimeError as e:
-        apply_error = str(e)
-        logger.warning("Claim built but not applied: %s", e)
-    except Exception as e:
-        apply_error = str(e)
-        logger.error("Unexpected error applying claim: %s", e)
-        cb.record_failure()
-
-    response = {
-        "status": "created",
-        "sticky": False,
-        "product": product_name,
-        "placement": {
-            "provider": placement.provider,
-            "region": placement.region,
-            "runtimeCluster": placement.runtime_cluster,
-            "network": placement.network,
-        },
-        "reason": placement.reason,
-        "claim": claim,
-        "applied_to_cluster": applied,
-        "namespace": svc_req.namespace,
-        "name": svc_req.name,
-    }
-    if apply_error:
-        response["apply_warning"] = apply_error
-    if placement.failover:
-        response["failover"] = placement.failover
-
-    return jsonify(response), 201
+    return jsonify(result), 201
 
 
 @services_bp.route("/api/services/<product_name>/<namespace>/<name>", methods=["GET"])
 def service_status(product_name: str, namespace: str, name: str):
-    """Return the claim status for any product."""
+    """Return the claim status for any product, enriched with DB state."""
     product = get_product(product_name)
     if product is None:
         return jsonify({"error": f"Unknown product: '{product_name}'"}), 404
 
+    # Get DB state (placement + saga)
+    db_placement = get_placement(namespace, name)
+    db_saga = get_saga_by_resource(namespace, name)
+
+    # Try K8s claim
+    claim = None
     try:
         claim = k8s.get_claim_generic(
             product.api_version, product.kind, namespace, name,
         )
-    except RuntimeError as e:
-        return jsonify({"error": str(e)}), 503
+    except RuntimeError:
+        pass
     except Exception as e:
-        return jsonify({"error": f"Failed to fetch claim: {e}"}), 500
+        logger.error("Error fetching claim: %s", e)
 
-    if claim is None:
+    if claim is None and db_placement is None:
         return jsonify({
             "error": "not_found",
             "message": f"{product.kind} '{namespace}/{name}' not found",
         }), 404
 
     secret_name = f"{name}{product.connection_secret_suffix}"
-    secret_exists = k8s.get_secret_exists(namespace, secret_name)
+    secret_exists = False
+    try:
+        secret_exists = k8s.get_secret_exists(namespace, secret_name)
+    except Exception:
+        pass
 
-    return jsonify({
+    response = {
         "product": product_name,
-        "claim": claim,
         "connectionSecret": {
             "name": secret_name,
             "namespace": namespace,
             "exists": secret_exists,
         },
-    }), 200
+    }
+    if claim:
+        response["claim"] = claim
+    if db_placement:
+        response["placement_record"] = db_placement
+    if db_saga:
+        response["saga"] = db_saga
+
+    return jsonify(response), 200
 
 
 @services_bp.route("/api/services/<product_name>/<namespace>/<name>/failover", methods=["POST"])
@@ -281,6 +246,17 @@ def force_service_failover(product_name: str, namespace: str, name: str):
     except Exception as e:
         apply_error = str(e)
 
+    # Record failover in DB
+    record_placement(
+        product=product_name, name=name, namespace=namespace,
+        cell=svc_req.cell, tier=svc_req.tier, environment=svc_req.environment,
+        provider=placement.provider, region=placement.region,
+        cluster=placement.runtime_cluster, ha=svc_req.ha,
+        total_score=placement.reason.get("selected", {}).get("total_score", 0),
+        reason=placement.reason, status="READY" if applied else "PROVISIONING",
+        failover=placement.failover,
+    )
+
     response = {
         "status": "failover_complete",
         "product": product_name,
@@ -303,3 +279,56 @@ def force_service_failover(product_name: str, namespace: str, name: str):
         response["failover"] = placement.failover
 
     return jsonify(response), 200
+
+
+# ── Multi-Cloud Deployment ──────────────────────────────────────────────────
+
+@services_bp.route("/api/services/<product_name>/multicloud", methods=["POST"])
+def multicloud_deploy(product_name: str):
+    """Deploy a service to multiple cloud providers simultaneously.
+
+    Request body:
+      {
+        "name": "checkout-web",
+        "namespace": "team-checkout",
+        "cell": "cell-us-east",
+        "tier": "business_critical",
+        "environment": "production",
+        "image": "registry.example.com/checkout:v2",
+        "target_providers": ["aws", "gcp"]
+      }
+
+    Creates independent placements per provider for active-active DR.
+    """
+    if get_config("multicloud_deploy_enabled", "true") != "true":
+        return jsonify({"error": "Multi-cloud deployment is disabled"}), 403
+
+    product = get_product(product_name)
+    if product is None:
+        return jsonify({
+            "error": f"Unknown product: '{product_name}'",
+            "available": [p["name"] for p in list_products()],
+        }), 404
+
+    body = request.get_json(silent=True)
+    if body is None:
+        return jsonify({"error": "Request body must be valid JSON"}), 400
+
+    target_providers = body.pop("target_providers", None)
+    if not target_providers or not isinstance(target_providers, list):
+        return jsonify({"error": "'target_providers' must be a non-empty list (e.g., ['aws', 'gcp'])"}), 400
+
+    # Enforce developer contract
+    present = _FORBIDDEN_FIELDS & set(body.keys())
+    if present:
+        return jsonify({
+            "error": f"Developer contract violation: fields {sorted(present)} are decided by the control plane",
+        }), 400
+
+    deployer = MultiCloudDeployer(product_name, body, target_providers)
+    result = deployer.deploy()
+
+    if "error" in result:
+        return jsonify(result), 422
+
+    return jsonify(result), 201

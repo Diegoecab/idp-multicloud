@@ -254,6 +254,30 @@
         <span>Feature Flags</span>
       </div>
     </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Admin</div>
+      <div class="nav-item" data-page="admin-providers">
+        <span class="nav-icon">&#9881;</span>
+        <span>Cloud Providers</span>
+      </div>
+      <div class="nav-item" data-page="admin-dr">
+        <span class="nav-icon">&#9888;</span>
+        <span>DR Policies</span>
+      </div>
+      <div class="nav-item" data-page="admin-config">
+        <span class="nav-icon">&#8942;</span>
+        <span>Platform Config</span>
+      </div>
+      <div class="nav-item" data-page="admin-sagas">
+        <span class="nav-icon">&#8634;</span>
+        <span>Saga History</span>
+      </div>
+      <div class="nav-item" data-page="admin-placements">
+        <span class="nav-icon">&#9993;</span>
+        <span>Placement History</span>
+      </div>
+    </div>
   </nav>
 
   <!-- ═══ MAIN CONTENT ═══ -->
@@ -367,6 +391,20 @@
             <!-- Product-specific params (injected dynamically) -->
             <div id="product-params"></div>
 
+            <hr style="border:none;border-top:1px solid #334155;margin:0.75rem 0 1rem;">
+            <div class="checkbox-row">
+              <input type="checkbox" id="svc-multicloud">
+              <label for="svc-multicloud" style="font-weight:600;">Multi-Cloud Deploy (active-active)</label>
+            </div>
+            <div id="multicloud-opts" style="display:none;">
+              <label>Target Providers (select multiple)</label>
+              <div style="display:flex;gap:1rem;margin-bottom:0.85rem;">
+                <div class="checkbox-row"><input type="checkbox" id="mc-aws" checked><label for="mc-aws">AWS</label></div>
+                <div class="checkbox-row"><input type="checkbox" id="mc-gcp" checked><label for="mc-gcp">GCP</label></div>
+                <div class="checkbox-row"><input type="checkbox" id="mc-oci"><label for="mc-oci">OCI</label></div>
+              </div>
+            </div>
+
             <button type="submit" class="primary" id="createBtn">Create</button>
             <p style="font-size:0.7rem;color:#475569;margin-top:0.5rem;">
               The control plane decides provider, region, and runtime cluster.
@@ -423,6 +461,41 @@
       <h2 class="page-title">Feature Flags</h2>
       <p class="page-subtitle">Runtime-toggleable placement policies</p>
       <div id="flags-content"></div>
+    </div>
+
+    <!-- ── Admin: Cloud Providers ── -->
+    <div id="page-admin-providers" class="page">
+      <h2 class="page-title">Cloud Provider Configuration</h2>
+      <p class="page-subtitle">Configure cloud provider connectivity and credentials</p>
+      <div id="admin-providers-content"></div>
+    </div>
+
+    <!-- ── Admin: DR Policies ── -->
+    <div id="page-admin-dr" class="page">
+      <h2 class="page-title">DR Policies</h2>
+      <p class="page-subtitle">Disaster recovery strategy per tier</p>
+      <div id="admin-dr-content"></div>
+    </div>
+
+    <!-- ── Admin: Platform Config ── -->
+    <div id="page-admin-config" class="page">
+      <h2 class="page-title">Platform Configuration</h2>
+      <p class="page-subtitle">General settings stored in the internal database</p>
+      <div id="admin-config-content"></div>
+    </div>
+
+    <!-- ── Admin: Saga History ── -->
+    <div id="page-admin-sagas" class="page">
+      <h2 class="page-title">Saga Executions</h2>
+      <p class="page-subtitle">Provisioning workflow history and state machine</p>
+      <div id="admin-sagas-content"></div>
+    </div>
+
+    <!-- ── Admin: Placement History ── -->
+    <div id="page-admin-placements" class="page">
+      <h2 class="page-title">Placement History</h2>
+      <p class="page-subtitle">All placement decisions stored in the database</p>
+      <div id="admin-placements-content"></div>
     </div>
   </div>
 
@@ -604,55 +677,7 @@
       loadCreatePage();
     });
 
-    // Create Service Form Submit
-    document.getElementById("createForm").addEventListener("submit", async function(e) {
-      e.preventDefault();
-      if (!selectedProduct) return;
-
-      var btn = document.getElementById("createBtn");
-      btn.disabled = true;
-      btn.textContent = "Creating...";
-
-      var payload = {
-        name: document.getElementById("svc-name").value.trim(),
-        namespace: document.getElementById("svc-namespace").value.trim() || "default",
-        cell: document.getElementById("svc-cell").value.trim(),
-        tier: document.getElementById("svc-tier").value,
-        environment: document.getElementById("svc-env").value,
-        ha: document.getElementById("svc-ha").checked
-      };
-
-      // Add product-specific params
-      (selectedProduct.parameters || []).forEach(function(param) {
-        if (param.name === "ha") return;
-        var el = document.getElementById("param-" + param.name);
-        if (!el) return;
-        if (param.type === "int") {
-          var val = el.value.trim();
-          if (val !== "") payload[param.name] = parseInt(val, 10);
-        } else if (param.type === "bool") {
-          payload[param.name] = el.checked;
-        } else {
-          var sval = el.value.trim();
-          if (sval !== "") payload[param.name] = sval;
-        }
-      });
-
-      try {
-        var resp = await fetch(API + "/api/services/" + selectedProduct.name, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        var data = await resp.json();
-        renderJSON("createResult", data, !resp.ok);
-      } catch (err) {
-        renderJSON("createResult", { error: err.message }, true);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Create";
-      }
-    });
+    // Create Service Form Submit (handled by multicloud-aware handler below)
 
     // ═══ STATUS PAGE ═══
     document.getElementById("statusForm").addEventListener("submit", async function(e) {
@@ -930,6 +955,382 @@
         loadFlags();
       } catch(e) { alert("Error: " + e.message); }
     }
+
+    // ═══ MULTICLOUD TOGGLE ═══
+    document.getElementById("svc-multicloud").addEventListener("change", function() {
+      document.getElementById("multicloud-opts").style.display = this.checked ? "" : "none";
+    });
+
+    // Override create form to support multicloud
+    var origSubmit = document.getElementById("createForm").onsubmit;
+    document.getElementById("createForm").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      if (!selectedProduct) return;
+      var isMulticloud = document.getElementById("svc-multicloud").checked;
+
+      var btn = document.getElementById("createBtn");
+      btn.disabled = true;
+      btn.textContent = isMulticloud ? "Deploying Multi-Cloud..." : "Creating...";
+
+      var payload = {
+        name: document.getElementById("svc-name").value.trim(),
+        namespace: document.getElementById("svc-namespace").value.trim() || "default",
+        cell: document.getElementById("svc-cell").value.trim(),
+        tier: document.getElementById("svc-tier").value,
+        environment: document.getElementById("svc-env").value,
+        ha: document.getElementById("svc-ha").checked
+      };
+      (selectedProduct.parameters || []).forEach(function(param) {
+        if (param.name === "ha") return;
+        var el = document.getElementById("param-" + param.name);
+        if (!el) return;
+        if (param.type === "int") {
+          var val = el.value.trim();
+          if (val !== "") payload[param.name] = parseInt(val, 10);
+        } else if (param.type === "bool") {
+          payload[param.name] = el.checked;
+        } else {
+          var sval = el.value.trim();
+          if (sval !== "") payload[param.name] = sval;
+        }
+      });
+
+      var url, method = "POST";
+      if (isMulticloud) {
+        var providers = [];
+        if (document.getElementById("mc-aws").checked) providers.push("aws");
+        if (document.getElementById("mc-gcp").checked) providers.push("gcp");
+        if (document.getElementById("mc-oci").checked) providers.push("oci");
+        payload.target_providers = providers;
+        url = API + "/api/services/" + selectedProduct.name + "/multicloud";
+      } else {
+        url = API + "/api/services/" + selectedProduct.name;
+      }
+
+      try {
+        var resp = await fetch(url, {
+          method: method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        var data = await resp.json();
+        renderJSON("createResult", data, !resp.ok);
+      } catch (err) {
+        renderJSON("createResult", { error: err.message }, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Create";
+      }
+    }, true);
+
+    // ═══ ADMIN: CLOUD PROVIDERS CONFIG ═══
+    async function loadAdminProviders() {
+      var container = document.getElementById("admin-providers-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/providers");
+        var data = await resp.json();
+        var providers = data.providers || [];
+
+        var html = '';
+        providers.forEach(function(p) {
+          html += '<div class="panel">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">' +
+            '<h3 style="color:#f1f5f9;font-size:1rem;">' +
+              '<span class="health-dot ' + (p.enabled ? "healthy" : "unhealthy") + '"></span>' +
+              p.display_name + ' (' + p.name + ')' +
+            '</h3>' +
+            '<button class="secondary" style="font-size:0.7rem;padding:0.25rem 0.5rem;color:#f87171;border-color:#f87171;" ' +
+              'onclick="deleteAdminProvider(\'' + p.name + '\')">Delete</button>' +
+            '</div>' +
+            '<table style="font-size:0.78rem;">' +
+            '<tr><td style="color:#64748b;width:150px;">Credentials Type</td><td>' + p.credentials_type + '</td></tr>' +
+            '<tr><td style="color:#64748b;">Credentials Ref</td><td style="font-family:monospace;">' + (p.credentials_ref || '-') + '</td></tr>' +
+            '<tr><td style="color:#64748b;">Regions</td><td>' + (p.regions.length > 0 ? p.regions.join(', ') : 'All') + '</td></tr>' +
+            '<tr><td style="color:#64748b;">Enabled</td><td>' + (p.enabled ? 'Yes' : 'No') + '</td></tr>' +
+            '</table></div>';
+        });
+
+        // Add provider form
+        html += '<div class="panel">' +
+          '<h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Add / Update Provider</h3>' +
+          '<div class="row">' +
+            '<div><label>Name</label><input type="text" id="ap-name" placeholder="aws"></div>' +
+            '<div><label>Display Name</label><input type="text" id="ap-display" placeholder="Amazon Web Services"></div>' +
+          '</div>' +
+          '<div class="row">' +
+            '<div><label>Credentials Type</label>' +
+              '<select id="ap-cred-type"><option value="secret">secret</option><option value="irsa">irsa</option><option value="workload_identity">workload_identity</option><option value="instance_principal">instance_principal</option></select></div>' +
+            '<div><label>Credentials Ref</label><input type="text" id="ap-cred-ref" placeholder="aws-credentials"></div>' +
+          '</div>' +
+          '<div class="row">' +
+            '<div><label>Regions (comma-separated)</label><input type="text" id="ap-regions" placeholder="us-east-1, eu-west-1"></div>' +
+            '<div><label>Enabled</label><select id="ap-enabled"><option value="true" selected>true</option><option value="false">false</option></select></div>' +
+          '</div>' +
+          '<button class="primary" onclick="saveAdminProvider()">Save Provider</button>' +
+          '</div>';
+
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function saveAdminProvider() {
+      var regions = document.getElementById("ap-regions").value.trim();
+      var body = {
+        name: document.getElementById("ap-name").value.trim(),
+        display_name: document.getElementById("ap-display").value.trim(),
+        credentials_type: document.getElementById("ap-cred-type").value,
+        credentials_ref: document.getElementById("ap-cred-ref").value.trim(),
+        regions: regions ? regions.split(",").map(function(r) { return r.trim(); }) : [],
+        enabled: document.getElementById("ap-enabled").value === "true"
+      };
+      if (!body.name) { alert("Provider name is required"); return; }
+      try {
+        await fetch(API + "/api/admin/providers", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        loadAdminProviders();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function deleteAdminProvider(name) {
+      if (!confirm("Delete provider '" + name + "'?")) return;
+      try {
+        await fetch(API + "/api/admin/providers/" + name, { method: "DELETE" });
+        loadAdminProviders();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ ADMIN: DR POLICIES ═══
+    async function loadAdminDR() {
+      var container = document.getElementById("admin-dr-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/dr-policies");
+        var data = await resp.json();
+        var policies = data.policies || [];
+
+        var html = '';
+        if (policies.length > 0) {
+          html += '<table><thead><tr><th>Tier</th><th>Strategy</th><th>Auto-Failover</th><th>RTO</th><th>RPO</th><th>Actions</th></tr></thead><tbody>';
+          policies.forEach(function(p) {
+            html += '<tr>' +
+              '<td style="font-weight:600;">' + p.tier + '</td>' +
+              '<td>' + p.strategy + '</td>' +
+              '<td><span class="health-dot ' + (p.auto_failover ? "healthy" : "unhealthy") + '"></span>' + (p.auto_failover ? 'Yes' : 'No') + '</td>' +
+              '<td>' + p.rto_target + ' min</td>' +
+              '<td>' + p.rpo_target + ' min</td>' +
+              '<td><button class="secondary" style="font-size:0.7rem;padding:0.25rem 0.5rem;color:#f87171;border-color:#f87171;" ' +
+                'onclick="deleteDRPolicy(\'' + p.tier + '\')">Delete</button></td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+
+        html += '<div class="panel" style="margin-top:1rem;">' +
+          '<h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Add / Update DR Policy</h3>' +
+          '<div class="row">' +
+            '<div><label>Tier</label><select id="dr-tier"><option>low</option><option>medium</option><option>critical</option><option>business_critical</option></select></div>' +
+            '<div><label>Strategy</label><select id="dr-strategy"><option>active_active</option><option>active_passive</option><option>backup_restore</option><option>pilot_light</option></select></div>' +
+          '</div>' +
+          '<div class="row">' +
+            '<div><label>RTO Target (min)</label><input type="number" id="dr-rto" value="60"></div>' +
+            '<div><label>RPO Target (min)</label><input type="number" id="dr-rpo" value="5"></div>' +
+            '<div><label>Auto-Failover</label><select id="dr-auto"><option value="false">No</option><option value="true">Yes</option></select></div>' +
+          '</div>' +
+          '<button class="primary" onclick="saveDRPolicy()">Save Policy</button>' +
+          '</div>';
+
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function saveDRPolicy() {
+      var body = {
+        tier: document.getElementById("dr-tier").value,
+        strategy: document.getElementById("dr-strategy").value,
+        rto_target: parseInt(document.getElementById("dr-rto").value, 10),
+        rpo_target: parseInt(document.getElementById("dr-rpo").value, 10),
+        auto_failover: document.getElementById("dr-auto").value === "true"
+      };
+      try {
+        await fetch(API + "/api/admin/dr-policies", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        loadAdminDR();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function deleteDRPolicy(tier) {
+      if (!confirm("Delete DR policy for '" + tier + "'?")) return;
+      try {
+        await fetch(API + "/api/admin/dr-policies/" + tier, { method: "DELETE" });
+        loadAdminDR();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ ADMIN: PLATFORM CONFIG ═══
+    async function loadAdminConfig() {
+      var container = document.getElementById("admin-config-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/config");
+        var data = await resp.json();
+        var config = data.config || {};
+        var keys = Object.keys(config);
+
+        var html = '';
+        if (keys.length > 0) {
+          html += '<table><thead><tr><th>Key</th><th>Value</th><th>Actions</th></tr></thead><tbody>';
+          keys.forEach(function(key) {
+            html += '<tr>' +
+              '<td style="font-family:monospace;">' + key + '</td>' +
+              '<td style="font-family:monospace;">' + config[key] + '</td>' +
+              '<td><button class="secondary" style="font-size:0.7rem;padding:0.25rem 0.5rem;color:#f87171;border-color:#f87171;" ' +
+                'onclick="deleteConfigKey(\'' + key + '\')">Delete</button></td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        } else {
+          html += '<div class="panel"><p style="color:#64748b;">No config keys set.</p></div>';
+        }
+
+        html += '<div class="panel" style="margin-top:1rem;">' +
+          '<h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Set Config</h3>' +
+          '<div class="row">' +
+            '<div><label>Key</label><input type="text" id="cfg-key" placeholder="saga_enabled"></div>' +
+            '<div><label>Value</label><input type="text" id="cfg-value" placeholder="true"></div>' +
+            '<div style="display:flex;align-items:flex-end;"><button class="primary" style="margin-bottom:0.85rem;" onclick="saveConfig()">Save</button></div>' +
+          '</div>' +
+          '</div>';
+
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function saveConfig() {
+      var key = document.getElementById("cfg-key").value.trim();
+      var value = document.getElementById("cfg-value").value.trim();
+      if (!key) { alert("Key is required"); return; }
+      try {
+        await fetch(API + "/api/admin/config/" + key, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value: value })
+        });
+        loadAdminConfig();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function deleteConfigKey(key) {
+      if (!confirm("Delete config '" + key + "'?")) return;
+      try {
+        await fetch(API + "/api/admin/config/" + key, { method: "DELETE" });
+        loadAdminConfig();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ ADMIN: SAGA HISTORY ═══
+    async function loadAdminSagas() {
+      var container = document.getElementById("admin-sagas-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/sagas?limit=30");
+        var data = await resp.json();
+        var sagas = data.sagas || [];
+
+        var html = '';
+        if (sagas.length === 0) {
+          html += '<div class="panel"><p style="color:#64748b;">No saga executions yet. Create a service to trigger a saga.</p></div>';
+        } else {
+          html += '<table><thead><tr><th>ID</th><th>Product</th><th>Name</th><th>State</th><th>Step</th><th>Steps Done</th><th>Error</th><th>Actions</th></tr></thead><tbody>';
+          sagas.forEach(function(s) {
+            var stateColor = s.state === 'COMPLETED' ? 'healthy' : (s.state === 'FAILED' || s.state === 'ROLLED_BACK' ? 'unhealthy' : '');
+            html += '<tr>' +
+              '<td>' + s.id + '</td>' +
+              '<td>' + s.product + '</td>' +
+              '<td style="font-family:monospace;font-size:0.75rem;">' + s.namespace + '/' + s.name + '</td>' +
+              '<td><span class="health-dot ' + stateColor + '"></span>' + s.state + '</td>' +
+              '<td>' + s.current_step + '</td>' +
+              '<td style="font-size:0.7rem;">' + s.steps_completed.join(', ') + '</td>' +
+              '<td style="font-size:0.7rem;color:#f87171;max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + (s.error || '-') + '</td>' +
+              '<td>' + (s.state === 'FAILED' || s.state === 'ROLLED_BACK' ?
+                '<button class="primary" style="font-size:0.7rem;padding:0.25rem 0.5rem;" onclick="retrySaga(' + s.id + ')">Retry</button>' : '-') +
+              '</td></tr>';
+          });
+          html += '</tbody></table>';
+        }
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function retrySaga(id) {
+      try {
+        await fetch(API + "/api/admin/sagas/" + id + "/retry", { method: "POST" });
+        loadAdminSagas();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ ADMIN: PLACEMENT HISTORY ═══
+    async function loadAdminPlacements() {
+      var container = document.getElementById("admin-placements-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/placements?limit=30");
+        var data = await resp.json();
+        var placements = data.placements || [];
+
+        var html = '';
+        if (placements.length === 0) {
+          html += '<div class="panel"><p style="color:#64748b;">No placement records yet.</p></div>';
+        } else {
+          html += '<table><thead><tr><th>ID</th><th>Product</th><th>Name</th><th>Provider</th><th>Region</th><th>Tier</th><th>HA</th><th>Status</th><th>Score</th></tr></thead><tbody>';
+          placements.forEach(function(p) {
+            var stateColor = p.status === 'READY' ? 'healthy' : (p.status === 'FAILED' ? 'unhealthy' : '');
+            html += '<tr>' +
+              '<td>' + p.id + '</td>' +
+              '<td>' + p.product + '</td>' +
+              '<td style="font-family:monospace;font-size:0.75rem;">' + p.namespace + '/' + p.name + '</td>' +
+              '<td>' + p.provider.toUpperCase() + '</td>' +
+              '<td>' + p.region + '</td>' +
+              '<td>' + p.tier + '</td>' +
+              '<td>' + (p.ha ? 'Yes' : 'No') + '</td>' +
+              '<td><span class="health-dot ' + stateColor + '"></span>' + p.status + '</td>' +
+              '<td>' + p.total_score.toFixed(4) + '</td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    // ═══ EXTENDED NAVIGATION ═══
+    function navigateToExtended(page) {
+      if (page === "admin-providers") loadAdminProviders();
+      if (page === "admin-dr") loadAdminDR();
+      if (page === "admin-config") loadAdminConfig();
+      if (page === "admin-sagas") loadAdminSagas();
+      if (page === "admin-placements") loadAdminPlacements();
+    }
+
+    // Patch navigateTo to handle admin pages
+    var _origNavigateTo = navigateTo;
+    navigateTo = function(page) {
+      _origNavigateTo(page);
+      navigateToExtended(page);
+    };
 
     // ═══ INIT ═══
     loadDashboard();

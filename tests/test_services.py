@@ -3,15 +3,13 @@
 import json
 import os
 import sys
+import tempfile
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import pytest
-
-sys.path.insert(0, os.path.join(PROJECT_ROOT, "cmd", "controlplane"))
-from main import create_app
 
 from internal.scheduler.scheduler import (
     _provider_health, _provider_circuit_breakers,
@@ -22,9 +20,29 @@ from internal.scheduler.experiments import (
 )
 
 
+@pytest.fixture(autouse=True)
+def temp_db():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    from internal.db import database
+    database.init_db(path)
+    database.seed_defaults()
+    yield path
+    os.unlink(path)
+
+
 @pytest.fixture
 def client():
-    app = create_app()
+    from flask import Flask
+    from internal.handlers.mysql import mysql_bp
+    from internal.handlers.services import services_bp
+    from internal.handlers.admin import admin_bp
+    import internal.products.catalog  # noqa: F401
+
+    app = Flask(__name__)
+    app.register_blueprint(mysql_bp)
+    app.register_blueprint(services_bp)
+    app.register_blueprint(admin_bp)
     app.config["TESTING"] = True
     with app.test_client() as c:
         yield c
@@ -134,9 +152,9 @@ def test_create_webapp_missing_image(client):
     body = _valid_webapp_body()
     del body["image"]
     resp = client.post("/api/services/webapp", json=body)
-    assert resp.status_code == 400
+    assert resp.status_code == 422
     data = resp.get_json()
-    assert any("image" in d for d in data["details"])
+    assert "image" in data.get("error", "")
 
 
 def test_create_webapp_invalid_cpu(client):
@@ -144,7 +162,7 @@ def test_create_webapp_invalid_cpu(client):
         "/api/services/webapp",
         json=_valid_webapp_body(cpu="999m"),
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 def test_create_webapp_invalid_replicas_too_high(client):
@@ -152,7 +170,7 @@ def test_create_webapp_invalid_replicas_too_high(client):
         "/api/services/webapp",
         json=_valid_webapp_body(replicas=100),
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 def test_create_webapp_invalid_replicas_too_low(client):
@@ -160,7 +178,7 @@ def test_create_webapp_invalid_replicas_too_low(client):
         "/api/services/webapp",
         json=_valid_webapp_body(replicas=0),
     )
-    assert resp.status_code == 400
+    assert resp.status_code == 422
 
 
 # ── MySQL via Generic Endpoint ───────────────────────────────────────────────
@@ -259,11 +277,10 @@ def test_services_missing_common_fields(client):
         "/api/services/webapp",
         json={"image": "myapp:latest"},
     )
-    assert resp.status_code == 400
-    details = resp.get_json()["details"]
-    error_text = " ".join(details)
-    assert "cell" in error_text
-    assert "name" in error_text
+    assert resp.status_code == 422
+    error = resp.get_json().get("error", "")
+    assert "cell" in error
+    assert "name" in error
 
 
 # ── HA Enforcement ───────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 """IDP Multicloud Control Plane — Entry Point.
 
 Starts the Flask HTTP server that exposes the multi-product provisioning API
-(MySQL, WebApp, and any registered products) and serves the minimal web UI.
+(MySQL, WebApp, and any registered products) and serves the web UI.
 
 Usage:
     python cmd/controlplane/main.py
@@ -10,6 +10,7 @@ Environment variables:
     IDP_HOST    — Listen address (default: 0.0.0.0)
     IDP_PORT    — Listen port    (default: 8080)
     IDP_DEBUG   — Enable debug mode (default: false)
+    IDP_DB_PATH — SQLite database path (default: idp.db)
 """
 
 import os
@@ -25,7 +26,9 @@ from flask import Flask, send_from_directory
 
 from internal.handlers.mysql import mysql_bp
 from internal.handlers.services import services_bp
+from internal.handlers.admin import admin_bp
 from internal.k8s.client import init_client
+from internal.db.database import init_db, seed_defaults
 import internal.products.catalog  # noqa: F401 — registers MySQL and WebApp products
 
 logging.basicConfig(
@@ -42,8 +45,9 @@ def create_app() -> Flask:
     # Register API routes
     app.register_blueprint(mysql_bp)
     app.register_blueprint(services_bp)
+    app.register_blueprint(admin_bp)
 
-    # Serve the minimal frontend
+    # Serve the frontend
     web_dir = os.path.join(PROJECT_ROOT, "web")
 
     @app.route("/web/")
@@ -62,6 +66,11 @@ def main():
     host = os.environ.get("IDP_HOST", "0.0.0.0")
     port = int(os.environ.get("IDP_PORT", "8080"))
     debug = os.environ.get("IDP_DEBUG", "false").lower() == "true"
+
+    # Initialize SQLite database
+    init_db()
+    seed_defaults()
+    logger.info("Database initialized (SQLite)")
 
     # Attempt to initialize Kubernetes client (non-fatal if unavailable)
     k8s_ok = init_client()
