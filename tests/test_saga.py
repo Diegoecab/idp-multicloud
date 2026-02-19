@@ -79,7 +79,7 @@ def test_saga_persists_saga_record():
     result = SagaOrchestrator("mysql", body).execute()
     saga = get_saga(result["saga_id"])
     assert saga["state"] == "COMPLETED"
-    assert len(saga["steps_completed"]) == 6  # all 6 steps
+    assert len(saga["steps_completed"]) == 7  # all 7 steps
 
 
 def test_saga_validation_failure():

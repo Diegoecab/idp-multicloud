@@ -165,6 +165,36 @@ def init_db(db_path: Optional[str] = None):
             updated_at  REAL NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS replication_pairs (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            cell                  TEXT NOT NULL,
+            name                  TEXT NOT NULL,
+            namespace             TEXT NOT NULL DEFAULT 'default',
+            product               TEXT NOT NULL DEFAULT 'mysql',
+            tier                  TEXT NOT NULL,
+            primary_provider      TEXT NOT NULL,
+            primary_region        TEXT NOT NULL,
+            primary_cluster       TEXT NOT NULL,
+            primary_placement_id  INTEGER,
+            secondary_provider    TEXT NOT NULL,
+            secondary_region      TEXT NOT NULL,
+            secondary_cluster     TEXT NOT NULL,
+            secondary_placement_id INTEGER,
+            gg_deployment_name    TEXT NOT NULL DEFAULT '',
+            gg_config             TEXT NOT NULL DEFAULT '{}',
+            state                 TEXT NOT NULL DEFAULT 'PENDING',
+            replication_lag_ms    REAL NOT NULL DEFAULT 0,
+            last_lag_check        REAL NOT NULL DEFAULT 0,
+            rpo_target_minutes    INTEGER NOT NULL DEFAULT 15,
+            rto_target_minutes    INTEGER NOT NULL DEFAULT 120,
+            failover_phase        TEXT NOT NULL DEFAULT 'IDLE',
+            dr_strategy           TEXT NOT NULL DEFAULT 'pilot_light',
+            created_at            REAL NOT NULL,
+            updated_at            REAL NOT NULL,
+            FOREIGN KEY (primary_placement_id) REFERENCES placements(id),
+            FOREIGN KEY (secondary_placement_id) REFERENCES placements(id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_placements_name ON placements(namespace, name);
         CREATE INDEX IF NOT EXISTS idx_placements_product ON placements(product);
         CREATE INDEX IF NOT EXISTS idx_placements_status ON placements(status);
@@ -172,6 +202,9 @@ def init_db(db_path: Optional[str] = None):
         CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
         CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
         CREATE INDEX IF NOT EXISTS idx_audit_log_product ON audit_log(product);
+        CREATE INDEX IF NOT EXISTS idx_replication_pairs_name ON replication_pairs(namespace, name);
+        CREATE INDEX IF NOT EXISTS idx_replication_pairs_cell ON replication_pairs(cell);
+        CREATE INDEX IF NOT EXISTS idx_replication_pairs_state ON replication_pairs(state);
     """)
     conn.commit()
 
@@ -780,3 +813,172 @@ def provider_has_credentials(provider: str) -> bool:
     if not cred:
         return False
     return bool(cred["cred_data"])
+
+
+# ── Replication Pairs ────────────────────────────────────────────────────────
+
+def create_replication_pair(cell: str, name: str, namespace: str, product: str,
+                            tier: str, primary_provider: str, primary_region: str,
+                            primary_cluster: str, primary_placement_id: int,
+                            secondary_provider: str, secondary_region: str,
+                            secondary_cluster: str, secondary_placement_id: int = None,
+                            gg_deployment_name: str = "", gg_config: dict = None,
+                            rpo_target_minutes: int = 15, rto_target_minutes: int = 120,
+                            dr_strategy: str = "pilot_light") -> int:
+    conn = _get_conn()
+    now = time.time()
+    cursor = conn.execute(
+        """INSERT INTO replication_pairs
+           (cell, name, namespace, product, tier,
+            primary_provider, primary_region, primary_cluster, primary_placement_id,
+            secondary_provider, secondary_region, secondary_cluster, secondary_placement_id,
+            gg_deployment_name, gg_config,
+            rpo_target_minutes, rto_target_minutes, dr_strategy,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (cell, name, namespace, product, tier,
+         primary_provider, primary_region, primary_cluster, primary_placement_id,
+         secondary_provider, secondary_region, secondary_cluster, secondary_placement_id,
+         gg_deployment_name, json.dumps(gg_config or {}),
+         rpo_target_minutes, rto_target_minutes, dr_strategy, now, now),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_replication_pair(namespace: str, name: str) -> Optional[dict]:
+    conn = _get_conn()
+    r = conn.execute(
+        """SELECT * FROM replication_pairs
+           WHERE namespace = ? AND name = ?
+           ORDER BY created_at DESC LIMIT 1""",
+        (namespace, name),
+    ).fetchone()
+    if not r:
+        return None
+    return _row_to_replication_pair(r)
+
+
+def get_replication_pair_by_id(pair_id: int) -> Optional[dict]:
+    conn = _get_conn()
+    r = conn.execute(
+        "SELECT * FROM replication_pairs WHERE id = ?", (pair_id,)
+    ).fetchone()
+    if not r:
+        return None
+    return _row_to_replication_pair(r)
+
+
+def list_replication_pairs(limit: int = 50, cell: str = None,
+                           state: str = None) -> list[dict]:
+    conn = _get_conn()
+    query = "SELECT * FROM replication_pairs WHERE 1=1"
+    params = []
+    if cell:
+        query += " AND cell = ?"
+        params.append(cell)
+    if state:
+        query += " AND state = ?"
+        params.append(state)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    return [_row_to_replication_pair(r) for r in rows]
+
+
+def update_replication_pair(pair_id: int, state: str = None,
+                            replication_lag_ms: float = None,
+                            failover_phase: str = None,
+                            secondary_placement_id: int = None,
+                            gg_deployment_name: str = None,
+                            gg_config: dict = None,
+                            primary_provider: str = None,
+                            primary_region: str = None,
+                            primary_cluster: str = None,
+                            secondary_provider: str = None,
+                            secondary_region: str = None,
+                            secondary_cluster: str = None):
+    conn = _get_conn()
+    updates = ["updated_at = ?"]
+    params = [time.time()]
+    if state is not None:
+        updates.append("state = ?")
+        params.append(state)
+    if replication_lag_ms is not None:
+        updates.append("replication_lag_ms = ?")
+        params.append(replication_lag_ms)
+        updates.append("last_lag_check = ?")
+        params.append(time.time())
+    if failover_phase is not None:
+        updates.append("failover_phase = ?")
+        params.append(failover_phase)
+    if secondary_placement_id is not None:
+        updates.append("secondary_placement_id = ?")
+        params.append(secondary_placement_id)
+    if gg_deployment_name is not None:
+        updates.append("gg_deployment_name = ?")
+        params.append(gg_deployment_name)
+    if gg_config is not None:
+        updates.append("gg_config = ?")
+        params.append(json.dumps(gg_config))
+    if primary_provider is not None:
+        updates.append("primary_provider = ?")
+        params.append(primary_provider)
+    if primary_region is not None:
+        updates.append("primary_region = ?")
+        params.append(primary_region)
+    if primary_cluster is not None:
+        updates.append("primary_cluster = ?")
+        params.append(primary_cluster)
+    if secondary_provider is not None:
+        updates.append("secondary_provider = ?")
+        params.append(secondary_provider)
+    if secondary_region is not None:
+        updates.append("secondary_region = ?")
+        params.append(secondary_region)
+    if secondary_cluster is not None:
+        updates.append("secondary_cluster = ?")
+        params.append(secondary_cluster)
+    params.append(pair_id)
+    conn.execute(
+        f"UPDATE replication_pairs SET {', '.join(updates)} WHERE id = ?",
+        params,
+    )
+    conn.commit()
+
+
+def _row_to_replication_pair(r) -> dict:
+    return {
+        "id": r["id"],
+        "cell": r["cell"],
+        "name": r["name"],
+        "namespace": r["namespace"],
+        "product": r["product"],
+        "tier": r["tier"],
+        "primary": {
+            "provider": r["primary_provider"],
+            "region": r["primary_region"],
+            "cluster": r["primary_cluster"],
+            "placement_id": r["primary_placement_id"],
+        },
+        "secondary": {
+            "provider": r["secondary_provider"],
+            "region": r["secondary_region"],
+            "cluster": r["secondary_cluster"],
+            "placement_id": r["secondary_placement_id"],
+        },
+        "goldengate": {
+            "deployment_name": r["gg_deployment_name"],
+            "config": json.loads(r["gg_config"]),
+        },
+        "state": r["state"],
+        "replication_lag_ms": r["replication_lag_ms"],
+        "last_lag_check": r["last_lag_check"],
+        "rpo_target_minutes": r["rpo_target_minutes"],
+        "rto_target_minutes": r["rto_target_minutes"],
+        "failover_phase": r["failover_phase"],
+        "dr_strategy": r["dr_strategy"],
+        "lag_within_rpo": r["replication_lag_ms"] <= (r["rpo_target_minutes"] * 60 * 1000),
+        "created_at": r["created_at"],
+        "updated_at": r["updated_at"],
+    }

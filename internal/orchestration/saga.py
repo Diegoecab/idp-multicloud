@@ -5,15 +5,17 @@ Saga lifecycle:
                      -> FAILED -> COMPENSATING -> ROLLED_BACK
 
 Steps:
-  1. validate     — validate request and product params
-  2. schedule     — run the scheduler to select provider/region
-  3. apply_claim  — build and apply the Crossplane claim
-  4. wait_ready   — (async) wait for claim to become ready
-  5. register     — register the placement in the DB
-  6. notify       — log/notify completion
+  1. validate          — validate request and product params
+  2. schedule          — run the scheduler to select provider/region
+  3. apply_claim       — build and apply the Crossplane claim
+  4. wait_ready        — (async) wait for claim to become ready
+  5. register          — register the placement in the DB
+  6. setup_replication — if tier requires DR, set up secondary + GoldenGate
+  7. notify            — log/notify completion
 
 Compensation (reverse order):
   - notify: no-op
+  - setup_replication: mark replication pair as ERROR
   - register: mark placement as FAILED
   - apply_claim: delete the claim from K8s
   - schedule: no-op (nothing to undo)
@@ -27,6 +29,8 @@ from internal.db.database import (
     create_saga, update_saga, get_saga, get_config,
     record_placement, update_placement_status,
     provider_has_credentials,
+    create_replication_pair, update_replication_pair,
+    get_dr_policy,
 )
 from internal.models.types import ServiceRequest
 from internal.products.registry import (
@@ -34,10 +38,14 @@ from internal.products.registry import (
 )
 from internal.scheduler.scheduler import schedule, get_circuit_breaker, CANDIDATES
 from internal.k8s import client as k8s
+from internal.replication.goldengate import (
+    needs_replication, resolve_dr_strategy, build_gg_config,
+    build_gg_resources, ReplicationPair, ReplicationState,
+)
 
 logger = logging.getLogger(__name__)
 
-SAGA_STEPS = ["validate", "schedule", "apply_claim", "wait_ready", "register", "notify"]
+SAGA_STEPS = ["validate", "schedule", "apply_claim", "wait_ready", "register", "setup_replication", "notify"]
 
 
 class SagaOrchestrator:
@@ -54,6 +62,8 @@ class SagaOrchestrator:
         self.saga_id = None
         self.applied = False
         self.steps_completed = []
+        self.replication_pair_id = None
+        self.gg_resources = None
 
     def execute(self) -> dict:
         """Run all saga steps. Returns result dict."""
@@ -165,13 +175,87 @@ class SagaOrchestrator:
         )
         update_saga(self.saga_id, placement_id=self.placement_id)
 
-    def _step_notify(self):
-        """Step 6: Log completion."""
+    def _step_setup_replication(self):
+        """Step 6: If tier requires DR, set up secondary DB + GoldenGate replication."""
+        if not needs_replication(self.svc_req.tier):
+            logger.info("Tier '%s' does not require GG replication, skipping",
+                        self.svc_req.tier)
+            return
+
+        if not self.placement.failover:
+            logger.info("No failover candidate available, skipping replication setup")
+            return
+
+        dr = resolve_dr_strategy(self.svc_req.tier)
+        dr_policy = get_dr_policy(self.svc_req.tier)
+        rpo = dr_policy["rpo_target"] if dr_policy else 15
+        rto = dr_policy["rto_target"] if dr_policy else 120
+
+        failover = self.placement.failover
+        pair = ReplicationPair(
+            cell=self.svc_req.cell,
+            name=self.svc_req.name,
+            namespace=self.svc_req.namespace,
+            product=self.product_name,
+            tier=self.svc_req.tier,
+            primary_provider=self.placement.provider,
+            primary_region=self.placement.region,
+            primary_cluster=self.placement.runtime_cluster,
+            primary_placement_id=self.placement_id,
+            secondary_provider=failover["provider"],
+            secondary_region=failover["region"],
+            secondary_cluster=failover["runtime_cluster"],
+            rpo_target_minutes=rpo,
+            rto_target_minutes=rto,
+            dr_strategy=dr["strategy"],
+        )
+
+        # Build GoldenGate configuration
+        gg_config = build_gg_config(pair)
+        self.gg_resources = build_gg_resources(gg_config)
+
+        # Store in DB
+        self.replication_pair_id = create_replication_pair(
+            cell=pair.cell, name=pair.name, namespace=pair.namespace,
+            product=pair.product, tier=pair.tier,
+            primary_provider=pair.primary_provider,
+            primary_region=pair.primary_region,
+            primary_cluster=pair.primary_cluster,
+            primary_placement_id=pair.primary_placement_id,
+            secondary_provider=pair.secondary_provider,
+            secondary_region=pair.secondary_region,
+            secondary_cluster=pair.secondary_cluster,
+            gg_deployment_name=gg_config.deployment_name,
+            gg_config={
+                "source": gg_config.source_connection,
+                "target": gg_config.target_connection,
+                "extract": gg_config.extract_name,
+                "replicat": gg_config.replicat_name,
+                "settings": gg_config.settings,
+            },
+            rpo_target_minutes=rpo,
+            rto_target_minutes=rto,
+            dr_strategy=dr["strategy"],
+        )
+        update_replication_pair(self.replication_pair_id,
+                                state=ReplicationState.REPLICATING.value)
+
         logger.info(
-            "Saga completed: %s/%s -> %s/%s (saga_id=%d, placement_id=%d)",
+            "Replication pair created: %s/%s -> %s/%s "
+            "(GG: %s, strategy: %s, RPO: %dmin, RTO: %dmin)",
+            pair.primary_provider, pair.primary_region,
+            pair.secondary_provider, pair.secondary_region,
+            gg_config.deployment_name, dr["strategy"], rpo, rto,
+        )
+
+    def _step_notify(self):
+        """Step 7: Log completion."""
+        logger.info(
+            "Saga completed: %s/%s -> %s/%s (saga_id=%d, placement_id=%d, replication=%s)",
             self.svc_req.namespace, self.svc_req.name,
             self.placement.provider, self.placement.region,
             self.saga_id, self.placement_id or 0,
+            self.replication_pair_id or "none",
         )
 
     def _compensate(self):
@@ -197,6 +281,12 @@ class SagaOrchestrator:
                 )
             except Exception as e:
                 logger.warning("Could not delete claim during compensation: %s", e)
+
+    def _compensate_setup_replication(self):
+        """Compensation: mark replication pair as ERROR."""
+        if self.replication_pair_id:
+            update_replication_pair(self.replication_pair_id,
+                                    state=ReplicationState.ERROR.value)
 
     def _compensate_register(self):
         """Compensation: mark placement as FAILED."""
@@ -227,6 +317,11 @@ class SagaOrchestrator:
         }
         if self.placement.failover:
             resp["failover"] = self.placement.failover
+        if self.replication_pair_id:
+            resp["replication"] = {
+                "pair_id": self.replication_pair_id,
+                "gg_resources": self.gg_resources,
+            }
         return resp
 
     def _build_error_response(self, error: str) -> dict:

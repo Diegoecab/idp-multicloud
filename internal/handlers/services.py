@@ -27,6 +27,13 @@ from internal.db.database import (
     get_config, get_placement, record_placement,
     get_saga_by_resource, get_dr_policy,
     append_audit_log, provider_has_credentials,
+    get_replication_pair, list_replication_pairs,
+    update_replication_pair, get_replication_pair_by_id,
+)
+from internal.replication.goldengate import (
+    needs_replication, resolve_dr_strategy, build_gg_config, build_gg_resources,
+    ReplicationPair, ReplicationState, FailoverPhase, FailoverOrchestrator,
+    TIER_DR_DEFAULTS,
 )
 
 logger = logging.getLogger(__name__)
@@ -378,3 +385,163 @@ def multicloud_deploy(product_name: str):
         return jsonify(result), 422
 
     return jsonify(result), 201
+
+
+# ── DR Replication ──────────────────────────────────────────────────────────
+
+@services_bp.route("/api/dr/replication", methods=["GET"])
+def list_replications():
+    """List all replication pairs with optional filters."""
+    cell = request.args.get("cell")
+    state = request.args.get("state")
+    limit = int(request.args.get("limit", 50))
+    pairs = list_replication_pairs(limit=limit, cell=cell, state=state)
+    return jsonify({"replication_pairs": pairs, "dr_strategies": TIER_DR_DEFAULTS}), 200
+
+
+@services_bp.route("/api/dr/replication/<namespace>/<name>", methods=["GET"])
+def get_replication_status(namespace: str, name: str):
+    """Return the replication status for a service instance."""
+    pair = get_replication_pair(namespace, name)
+    if not pair:
+        return jsonify({
+            "error": "not_found",
+            "message": f"No replication pair for '{namespace}/{name}'",
+            "hint": "Replication is only set up for tiers that require DR (low, business_critical)",
+        }), 404
+
+    dr_strategy = resolve_dr_strategy(pair["tier"])
+    return jsonify({
+        "replication": pair,
+        "dr_strategy": dr_strategy,
+        "needs_replication": needs_replication(pair["tier"]),
+    }), 200
+
+
+@services_bp.route("/api/dr/replication/<namespace>/<name>/lag", methods=["PUT"])
+def update_lag(namespace: str, name: str):
+    """Update the replication lag for a pair (called by monitoring probes)."""
+    pair = get_replication_pair(namespace, name)
+    if not pair:
+        return jsonify({"error": "not_found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    lag_ms = body.get("lag_ms")
+    if lag_ms is None or not isinstance(lag_ms, (int, float)):
+        return jsonify({"error": "'lag_ms' is required (number)"}), 400
+
+    rpo_ms = pair["rpo_target_minutes"] * 60 * 1000
+    new_state = pair["state"]
+    if lag_ms > rpo_ms * 0.8:
+        new_state = "LAG_WARNING"
+    elif pair["state"] == "LAG_WARNING":
+        new_state = "REPLICATING"
+
+    update_replication_pair(pair["id"], replication_lag_ms=lag_ms, state=new_state)
+    return jsonify({
+        "status": "updated",
+        "lag_ms": lag_ms,
+        "rpo_target_ms": rpo_ms,
+        "within_rpo": lag_ms <= rpo_ms,
+        "state": new_state,
+    }), 200
+
+
+@services_bp.route("/api/dr/replication/<namespace>/<name>/failover", methods=["POST"])
+def dr_failover(namespace: str, name: str):
+    """Execute a controlled DR failover for a replication pair.
+
+    Steps:
+      1. Freeze writes (write fence)
+      2. Verify replication lag <= RPO
+      3. Promote secondary as writer
+      4. Update DNS/GSLB
+      5. Scale compute if pilot-light
+    """
+    pair_dict = get_replication_pair(namespace, name)
+    if not pair_dict:
+        return jsonify({
+            "error": "not_found",
+            "message": f"No replication pair for '{namespace}/{name}'",
+        }), 404
+
+    if pair_dict["state"] == "FAILOVER_IN_PROGRESS":
+        return jsonify({"error": "Failover already in progress"}), 409
+
+    # Reconstruct the ReplicationPair object
+    pair = ReplicationPair(
+        id=pair_dict["id"],
+        cell=pair_dict["cell"],
+        name=pair_dict["name"],
+        namespace=pair_dict["namespace"],
+        product=pair_dict["product"],
+        tier=pair_dict["tier"],
+        primary_provider=pair_dict["primary"]["provider"],
+        primary_region=pair_dict["primary"]["region"],
+        primary_cluster=pair_dict["primary"]["cluster"],
+        primary_placement_id=pair_dict["primary"]["placement_id"],
+        secondary_provider=pair_dict["secondary"]["provider"],
+        secondary_region=pair_dict["secondary"]["region"],
+        secondary_cluster=pair_dict["secondary"]["cluster"],
+        secondary_placement_id=pair_dict["secondary"]["placement_id"],
+        state=ReplicationState(pair_dict["state"]),
+        replication_lag_ms=pair_dict["replication_lag_ms"],
+        rpo_target_minutes=pair_dict["rpo_target_minutes"],
+        rto_target_minutes=pair_dict["rto_target_minutes"],
+        dr_strategy=pair_dict["dr_strategy"],
+    )
+
+    update_replication_pair(pair.id,
+                            state=ReplicationState.FAILOVER_IN_PROGRESS.value,
+                            failover_phase=FailoverPhase.FREEZE_WRITES.value)
+
+    orchestrator = FailoverOrchestrator(pair)
+    t0 = time.time()
+    result = orchestrator.execute()
+    duration_ms = (time.time() - t0) * 1000
+
+    # Persist final state
+    if result["status"] == "completed":
+        update_replication_pair(
+            pair.id,
+            state=ReplicationState.FAILED_OVER.value,
+            failover_phase=FailoverPhase.COMPLETED.value,
+            primary_provider=pair.primary_provider,
+            primary_region=pair.primary_region,
+            primary_cluster=pair.primary_cluster,
+            secondary_provider=pair.secondary_provider,
+            secondary_region=pair.secondary_region,
+            secondary_cluster=pair.secondary_cluster,
+        )
+    else:
+        update_replication_pair(
+            pair.id,
+            state=ReplicationState.ERROR.value,
+            failover_phase=FailoverPhase.ABORTED.value,
+        )
+
+    result["duration_ms"] = duration_ms
+
+    append_audit_log(
+        action="dr_failover",
+        product=pair_dict["product"],
+        name=name,
+        namespace=namespace,
+        source_ip=request.remote_addr,
+        method="POST",
+        path=request.path,
+        response_status=200 if result["status"] == "completed" else 422,
+        response_summary=result,
+        provider=pair.primary_provider,
+        region=pair.primary_region,
+        duration_ms=duration_ms,
+    )
+
+    status_code = 200 if result["status"] == "completed" else 422
+    return jsonify(result), status_code
+
+
+@services_bp.route("/api/dr/strategies", methods=["GET"])
+def get_dr_strategies():
+    """Return the DR strategy definitions per tier."""
+    return jsonify({"strategies": TIER_DR_DEFAULTS}), 200
