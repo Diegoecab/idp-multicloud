@@ -1008,41 +1008,174 @@ python -m pytest tests/ -v
 
 Without a Kubernetes cluster, the API runs in **standalone mode**: claims are generated and returned in the response but not applied to a cluster. This is the expected behavior for local development.
 
-### Running on Windows WSL
+### WSL2 Local Setup (Docker + Minikube)
 
-The project works fully on WSL (Windows Subsystem for Linux). If you also want to deploy to a local Kubernetes cluster using minikube:
+Full guide for running the IDP control plane on Windows WSL2 with a local Kubernetes cluster.
+
+#### Prerequisites
+
+| Tool | Install |
+|------|---------|
+| **Docker** | Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) and enable **WSL 2 integration** in Settings > Resources > WSL Integration |
+| **kubectl** | `curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && sudo install kubectl /usr/local/bin/` |
+| **minikube** | `curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64 && sudo install minikube-linux-amd64 /usr/local/bin/minikube` |
+| **helm** | `curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \| bash` |
+
+> **Note:** `systemctl` does not work in WSL2 by default (`System has not been booted with systemd`). Docker Desktop handles the Docker daemon externally — you don't need systemd.
+
+#### Step 1: Verify Docker is accessible
 
 ```bash
-# 1. Start minikube with Docker driver
-minikube start --driver=docker
+docker ps
+# Should list containers (or an empty table). If you get "Cannot connect to the Docker daemon",
+# open Docker Desktop for Windows and ensure it's running with WSL integration enabled.
+```
 
-# 2. Verify the cluster is running
+#### Step 2: Start Minikube
+
+Minikube in WSL2 can fail during addon validation if the API server isn't fully ready. Use this two-phase start:
+
+```bash
+# Phase 1: Create the cluster container without Kubernetes (avoids OpenAPI validation timeout)
+minikube start --driver=docker --no-kubernetes
+
+# Phase 2: Start Kubernetes with explicit config
+minikube start --driver=docker \
+  --kubernetes-version=v1.35.0 \
+  --addons= \
+  --extra-config=apiserver.bind-address=0.0.0.0
+```
+
+#### Step 3: Verify the cluster
+
+```bash
+# Check kubectl context points to minikube
+kubectl config current-context
+# → minikube
+
+# Verify API server is reachable
 kubectl cluster-info
 # → Kubernetes control plane is running at https://127.0.0.1:<port>
 
-# 3. Load the Docker image into minikube (avoids remote registry)
+# Verify node is Ready
+kubectl get nodes -o wide
+# → minikube   Ready   control-plane   ...
+```
+
+#### Step 4: Enable storage addons
+
+```bash
+minikube addons enable default-storageclass
+minikube addons enable storage-provisioner
+```
+
+#### Step 5: Build and deploy the control plane
+
+```bash
+# Build the container image
 docker build -t idp-controlplane:latest .
+
+# Load into minikube (avoids needing a remote registry)
 minikube image load idp-controlplane:latest
 
-# 4. Deploy and expose
+# Create deployment + service
 kubectl create deployment idp-controlplane --image=idp-controlplane:latest
 kubectl expose deployment idp-controlplane --port=8080
+
+# Force local image (don't pull from registry)
 kubectl patch deployment idp-controlplane \
   -p '{"spec":{"template":{"spec":{"containers":[{"name":"idp-controlplane","imagePullPolicy":"IfNotPresent"}]}}}}'
 
-# 5. Access the API
+# Apply RBAC for Crossplane claims
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idp-controlplane
+rules:
+  - apiGroups: ["db.platform.example.org"]
+    resources: ["mysqlinstanceclaims", "postgresqlinstanceclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["compute.platform.example.org"]
+    resources: ["webappclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: idp-controlplane
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: idp-controlplane
+  apiGroup: rbac.authorization.k8s.io
+EOF
+
+# Wait for pod to be ready
+kubectl rollout status deployment/idp-controlplane --timeout=60s
+```
+
+#### Step 6: Access the API
+
+```bash
 kubectl port-forward svc/idp-controlplane 8080:8080
 # → Open http://localhost:8080/web/ in your browser
 ```
 
-**Common WSL issues:**
+If using an updated image, rebuild and redeploy:
 
-| Issue | Solution |
-|-------|----------|
-| `connection refused` on `kubectl` commands | Run `minikube start --driver=docker` — the cluster may be stopped |
-| `kubectl port-forward` fails with connection error | Minikube needs time to start. Wait 10-15 seconds after `minikube start`, then retry |
-| Docker not found | Install Docker Desktop for Windows and enable WSL 2 integration |
-| Slow image load | Use `minikube image load` instead of `docker push` to avoid pulling from a registry |
+```bash
+docker build -t idp-controlplane:latest .
+minikube image load idp-controlplane:latest
+kubectl rollout restart deployment/idp-controlplane
+kubectl rollout status deployment/idp-controlplane --timeout=60s
+```
+
+#### Crossplane Setup
+
+**Verify existing installation:**
+
+```bash
+kubectl get pods -n crossplane-system
+# Should show: crossplane, crossplane-rbac-manager, and provider pods Running
+```
+
+**Install or upgrade Crossplane (idempotent):**
+
+```bash
+helm repo add crossplane-stable https://charts.crossplane.io/stable
+helm repo update
+helm upgrade --install crossplane crossplane-stable/crossplane \
+  --namespace crossplane-system --create-namespace --wait
+```
+
+> Use `helm upgrade --install` instead of `helm install` — it works whether Crossplane is already installed or not.
+
+**Full reinstall (if needed):**
+
+```bash
+helm uninstall crossplane -n crossplane-system
+kubectl delete namespace crossplane-system
+# Then re-run the install command above
+```
+
+#### Troubleshooting
+
+| Error Message | Cause | Solution |
+|---------------|-------|----------|
+| `Cannot connect to the Docker daemon at unix:///var/run/docker.sock` | Docker Desktop is not running or WSL integration is disabled | Open Docker Desktop for Windows. Go to Settings > Resources > WSL Integration and enable your distro |
+| `System has not been booted with systemd as init system` | WSL2 doesn't use systemd by default. `systemctl start docker` won't work | Don't use `systemctl`. Docker Desktop manages the daemon. Verify with `docker ps` |
+| `Kubernetes cluster unreachable ... connect: connection refused` | The API server isn't running. kubeconfig points to `https://127.0.0.1:<port>` but nothing is listening | Run `minikube start --driver=docker`. If it was already started, run `minikube stop && minikube start --driver=docker` |
+| `cannot re-use a name that is still in use` (helm) | `helm install` fails because the release already exists | Use `helm upgrade --install` instead of `helm install`. Or uninstall first: `helm uninstall <name> -n <namespace>` |
+| `socat ... connect(5, AF=2 127.0.0.1:8080): Connection refused` during port-forward | The pod is not listening on port 8080. It's either crashing or hasn't started yet | Check pod status: `kubectl get pods` and `kubectl logs deploy/idp-controlplane`. Common causes: image not loaded (`ImagePullBackOff`), missing RBAC, crash during K8s client init. Rebuild and reload the image if needed |
+| `ImagePullBackOff` or `ErrImagePull` | minikube can't find the local image | Run `minikube image load idp-controlplane:latest` and ensure `imagePullPolicy: IfNotPresent` is set |
+| `CrashLoopBackOff` | The pod keeps crashing on startup | Check logs: `kubectl logs deploy/idp-controlplane --previous`. Usually a Python import error or K8s client issue. The app handles K8s unavailability gracefully — check if all dependencies are installed in the image |
 
 ---
 
@@ -1540,14 +1673,14 @@ metadata:
   name: idp-controlplane
 rules:
   - apiGroups: ["db.platform.example.org"]
-    resources: ["mysqlinstanceclaims"]
+    resources: ["mysqlinstanceclaims", "postgresqlinstanceclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["compute.platform.example.org"]
     resources: ["webappclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get"]  # only check existence, never read data
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

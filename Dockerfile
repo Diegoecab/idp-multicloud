@@ -23,6 +23,10 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # Copiar el código
 COPY . /app
 
+# Directorio por defecto para la base de datos SQLite
+RUN mkdir -p /data
+ENV IDP_DB_PATH=/data/idp.db
+
 # Puerto por defecto del control plane (IDP_PORT default 8080)
 EXPOSE 8080
 

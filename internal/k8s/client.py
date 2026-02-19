@@ -56,8 +56,16 @@ def init_client() -> bool:
             )
             return False
 
-    _api_client = k8s_client.ApiClient()
-    _dynamic_client = DynamicClient(_api_client)
+    try:
+        _api_client = k8s_client.ApiClient()
+        _dynamic_client = DynamicClient(_api_client)
+    except Exception as e:
+        logger.warning(
+            "Kubernetes client initialized config but DynamicClient failed: %s. "
+            "K8s operations will be unavailable.", e
+        )
+        return False
+
     return True
 
 
