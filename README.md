@@ -509,6 +509,7 @@ The platform supports **multiple cloud products** through an extensible product 
 | Product | Kind | API Version | Description |
 |---------|------|-------------|-------------|
 | `mysql` | `MySQLInstanceClaim` | `db.platform.example.org/v1alpha1` | Managed MySQL with backups, replication, failover |
+| `postgresql` | `PostgreSQLInstanceClaim` | `db.platform.example.org/v1alpha1` | Managed PostgreSQL with extensions, JSONB, and replication |
 | `webapp` | `WebAppClaim` | `compute.platform.example.org/v1alpha1` | Web application compute with auto-scaling, LB, TLS |
 
 ### How It Works
@@ -652,7 +653,7 @@ Both products go through the **same scheduling pipeline** with the same HA enfor
 idp-multicloud/
 ├── cmd/
 │   └── controlplane/
-│       └── main.py                 # Entry point — Flask server
+│       └── main.py                 # Entry point — Flask server + DB init
 ├── internal/
 │   ├── models/
 │   │   └── types.py                # Data types: MySQLRequest, ServiceRequest, Candidate
@@ -663,15 +664,20 @@ idp-multicloud/
 │   │   └── experiments.py          # A/B testing, feature flags, placement analytics
 │   ├── products/
 │   │   ├── registry.py             # Product registry: ProductDefinition, validation, claim builder
-│   │   └── catalog.py              # Product catalog: MySQL, WebApp (add new products here)
+│   │   └── catalog.py              # Product catalog: MySQL, WebApp, PostgreSQL (add new products here)
 │   ├── k8s/
 │   │   ├── client.py               # Kubernetes dynamic client (SSA, CRUD, generic + MySQL)
 │   │   └── claim_builder.py        # Crossplane MySQLInstanceClaim builder (legacy)
+│   ├── db/
+│   │   └── database.py             # SQLite persistent state store (config, placements, sagas, DR)
+│   ├── orchestration/
+│   │   └── saga.py                 # Saga orchestrator with compensation/rollback
 │   └── handlers/
 │       ├── mysql.py                # MySQL-specific API (backward compatible)
-│       └── services.py             # Generic multi-product API: /api/services/<product>
+│       ├── services.py             # Generic multi-product API: /api/services/<product>
+│       └── admin.py                # Admin API: config, providers, DR, sagas, placements
 ├── web/
-│   └── index.html                  # Minimal frontend (vanilla HTML + JS)
+│   └── index.html                  # Frontend (vanilla HTML + JS) with admin section
 ├── tests/
 │   ├── test_models.py              # Model validation tests
 │   ├── test_policy.py              # Tier framework tests
@@ -680,7 +686,11 @@ idp-multicloud/
 │   ├── test_handlers.py            # API endpoint tests (MySQL legacy)
 │   ├── test_experiments.py         # A/B testing and feature flag tests
 │   ├── test_product_registry.py    # Product registry unit tests
-│   └── test_services.py            # Generic services endpoint tests
+│   ├── test_services.py            # Generic services endpoint tests
+│   ├── test_database.py            # SQLite state store tests
+│   ├── test_saga.py                # Saga orchestrator tests
+│   └── test_admin.py               # Admin API endpoint tests
+├── Dockerfile
 ├── requirements.txt
 └── README.md
 ```
@@ -955,13 +965,38 @@ python cmd/controlplane/main.py
 
 The server starts on `http://localhost:8080`. The web UI is at `http://localhost:8080/web/`.
 
-Environment variables:
+### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `IDP_HOST` | `0.0.0.0` | Listen address |
 | `IDP_PORT` | `8080` | Listen port |
 | `IDP_DEBUG` | `false` | Enable Flask debug mode |
+| `IDP_DB_PATH` | `idp.db` | SQLite database file path. Set to a persistent location to preserve state across restarts |
+
+### Persistent State (SQLite)
+
+All platform configuration (cloud providers, DR policies, saga settings), placement history, experiments, and feature flags are stored in a **SQLite database**. By default the file is `idp.db` in the working directory.
+
+To preserve all settings and history across code reloads or container restarts, set `IDP_DB_PATH` to a persistent location:
+
+```bash
+# Linux / WSL — store in home directory
+export IDP_DB_PATH=~/idp-data/idp.db
+mkdir -p ~/idp-data
+python cmd/controlplane/main.py
+
+# Docker — mount a volume for the database
+docker run -p 8080:8080 \
+  -v idp-data:/data \
+  -e IDP_DB_PATH=/data/idp.db \
+  idp-controlplane:latest
+```
+
+When starting, the control plane automatically:
+1. Creates all tables if the database doesn't exist
+2. Seeds default provider configs (AWS, GCP, OCI), DR policies, and saga settings
+3. Preserves any previously saved configs — seed only inserts if rows don't exist
 
 ### Run tests
 
@@ -972,6 +1007,42 @@ python -m pytest tests/ -v
 ### Standalone mode
 
 Without a Kubernetes cluster, the API runs in **standalone mode**: claims are generated and returned in the response but not applied to a cluster. This is the expected behavior for local development.
+
+### Running on Windows WSL
+
+The project works fully on WSL (Windows Subsystem for Linux). If you also want to deploy to a local Kubernetes cluster using minikube:
+
+```bash
+# 1. Start minikube with Docker driver
+minikube start --driver=docker
+
+# 2. Verify the cluster is running
+kubectl cluster-info
+# → Kubernetes control plane is running at https://127.0.0.1:<port>
+
+# 3. Load the Docker image into minikube (avoids remote registry)
+docker build -t idp-controlplane:latest .
+minikube image load idp-controlplane:latest
+
+# 4. Deploy and expose
+kubectl create deployment idp-controlplane --image=idp-controlplane:latest
+kubectl expose deployment idp-controlplane --port=8080
+kubectl patch deployment idp-controlplane \
+  -p '{"spec":{"template":{"spec":{"containers":[{"name":"idp-controlplane","imagePullPolicy":"IfNotPresent"}]}}}}'
+
+# 5. Access the API
+kubectl port-forward svc/idp-controlplane 8080:8080
+# → Open http://localhost:8080/web/ in your browser
+```
+
+**Common WSL issues:**
+
+| Issue | Solution |
+|-------|----------|
+| `connection refused` on `kubectl` commands | Run `minikube start --driver=docker` — the cluster may be stopped |
+| `kubectl port-forward` fails with connection error | Minikube needs time to start. Wait 10-15 seconds after `minikube start`, then retry |
+| Docker not found | Install Docker Desktop for Windows and enable WSL 2 integration |
+| Slow image load | Use `minikube image load` instead of `docker push` to avoid pulling from a registry |
 
 ---
 
@@ -1294,6 +1365,7 @@ Repeat for GCP and OCI.
 
 The Crossplane XRD (CompositeResourceDefinition) defines the claim schema:
 
+```bash
 cat > xrd-mysql.yaml <<'EOF'
 apiVersion: apiextensions.crossplane.io/v1
 kind: CompositeResourceDefinition
@@ -1339,12 +1411,16 @@ spec:
 EOF
 
 kubectl apply -f xrd-mysql.yaml
-#Verify
+
+# Verify
 kubectl api-resources | grep mysql
+```
 
 ### Step 5: Create Compositions (one per provider)
 
-#Install Composition Function (Pipeline Mode)
+Install the Composition Function (Pipeline Mode):
+
+```bash
 cat > function-patch-and-transform.yaml <<'EOF'
 apiVersion: pkg.crossplane.io/v1
 kind: Function
@@ -1356,9 +1432,7 @@ EOF
 
 kubectl apply -f function-patch-and-transform.yaml
 kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
-
-kubectl apply -f function-patch-and-transform.yaml
-kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
+```
 
 Each Composition maps a `MySQLInstanceClaim` to provider-specific managed resources:
 
@@ -1490,11 +1564,11 @@ roleRef:
 EOF
 ```
 
-# To Access Control Plane API
-# Use port-forward
+Access the Control Plane API via port-forward:
+
+```bash
 kubectl port-forward svc/idp-controlplane 8080:8080
-
-
+```
 
 ### End-to-End Verification
 
@@ -1523,7 +1597,7 @@ kubectl get mysqlinstanceclaim test-db \
 ## Next Steps
 
 ### More Products
-- Add Redis, PostgreSQL, Load Balancer, Graph DB, Cache products to `catalog.py`.
+- Add Redis, Load Balancer, Graph DB, Cache products to `catalog.py`.
 - Each product only requires a `ProductDefinition` + Crossplane Composition.
 
 ### AuthN / AuthZ

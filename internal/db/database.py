@@ -42,6 +42,10 @@ def init_db(db_path: Optional[str] = None):
             _local.conn.close()
             _local.conn = None
 
+    # Ensure parent directory exists
+    db_dir = os.path.dirname(os.path.abspath(_DB_PATH))
+    os.makedirs(db_dir, exist_ok=True)
+
     conn = _get_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS config (

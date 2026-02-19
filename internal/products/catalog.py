@@ -87,3 +87,41 @@ WEBAPP = ProductDefinition(
 )
 
 register_product(WEBAPP)
+
+
+# ── PostgreSQL ──────────────────────────────────────────────────────────────
+
+def _postgresql_param_builder(body: dict) -> dict:
+    """Map request body to PostgreSQL-specific claim parameters."""
+    return {
+        "size": body.get("size", "medium"),
+        "storageGB": body.get("storageGB", 50),
+        "version": body.get("version", "15"),
+        "ha": body.get("ha", False),
+        "extensions": body.get("extensions", []),
+    }
+
+
+POSTGRESQL = ProductDefinition(
+    name="postgresql",
+    display_name="Managed PostgreSQL",
+    description="Managed PostgreSQL database with extensions, JSONB support, and replication.",
+    api_version="db.platform.example.org/v1alpha1",
+    kind="PostgreSQLInstanceClaim",
+    composition_class="postgresql",
+    composition_group="db.platform.example.org",
+    parameters=[
+        ParameterSpec(name="size", param_type="choice",
+                      choices=("small", "medium", "large", "xlarge")),
+        ParameterSpec(name="storageGB", param_type="int",
+                      min_value=10, max_value=65536),
+        ParameterSpec(name="version", param_type="choice",
+                      choices=("13", "14", "15", "16"),
+                      required=False, default="15"),
+        ParameterSpec(name="ha", param_type="bool", required=False, default=False),
+    ],
+    connection_secret_suffix="-conn",
+    param_builder=_postgresql_param_builder,
+)
+
+register_product(POSTGRESQL)

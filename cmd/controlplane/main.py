@@ -68,9 +68,10 @@ def main():
     debug = os.environ.get("IDP_DEBUG", "false").lower() == "true"
 
     # Initialize SQLite database
-    init_db()
+    db_path = os.environ.get("IDP_DB_PATH", "idp.db")
+    init_db(db_path)
     seed_defaults()
-    logger.info("Database initialized (SQLite)")
+    logger.info("Database initialized (SQLite: %s)", os.path.abspath(db_path))
 
     # Attempt to initialize Kubernetes client (non-fatal if unavailable)
     k8s_ok = init_client()

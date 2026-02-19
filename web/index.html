@@ -549,7 +549,7 @@
 
     // Product icon class
     function getIconClass(name) {
-      if (name === "mysql") return "db";
+      if (name === "mysql" || name === "postgresql") return "db";
       if (name === "webapp") return "compute";
       if (name === "redis" || name === "cache") return "cache";
       if (name === "loadbalancer") return "lb";
@@ -557,6 +557,7 @@
     }
     function getIconChar(name) {
       if (name === "mysql") return "&#9733;";
+      if (name === "postgresql") return "&#9741;";
       if (name === "webapp") return "&#9998;";
       if (name === "redis" || name === "cache") return "&#9830;";
       return "&#9679;";
@@ -565,7 +566,6 @@
     // Upcoming products (not yet registered, shown as "coming soon")
     var upcomingProducts = [
       { name: "redis", display_name: "Managed Redis", description: "High-performance in-memory data store for caching and sessions.", upcoming: true },
-      { name: "postgresql", display_name: "Managed PostgreSQL", description: "Advanced relational database with JSON support and extensions.", upcoming: true },
       { name: "loadbalancer", display_name: "Load Balancer", description: "L4/L7 load balancing with TLS termination and health checks.", upcoming: true },
       { name: "graphdb", display_name: "Graph Database", description: "Graph database for relationship-heavy data models.", upcoming: true },
       { name: "cache", display_name: "Cache Service", description: "Distributed caching layer with TTL policies and eviction.", upcoming: true },
