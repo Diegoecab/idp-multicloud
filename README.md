@@ -1,23 +1,27 @@
 # IDP Multicloud
 
-A cell-based Internal Developer Platform (IDP) control plane for provisioning managed MySQL across AWS, GCP, and OCI. Developers declare **what** they need; the control plane decides **where** it runs.
+A cell-based Internal Developer Platform (IDP) control plane for provisioning managed cloud services (MySQL, WebApp, and more) across AWS, GCP, and OCI. Developers declare **what** they need; the control plane decides **where** it runs.
 
 ---
 
 ## Objective
 
-Provide a **cell-based contract** for developers to request managed MySQL instances while the control plane autonomously decides provider, region, runtime cluster, and network placement across multiple clouds using a **tiered criticality framework**.
+Provide a **cell-based contract** for developers to request managed cloud services while the control plane autonomously decides provider, region, runtime cluster, and network placement across multiple clouds using a **tiered criticality framework**.
 
 Developers specify only:
 
-| Field | Description |
-|-------|-------------|
-| `cell` | Logical cell identifier |
-| `tier` | Criticality tier (`low`, `medium`, `critical`, `business_critical`) |
-| `environment` | Target environment (`dev`, `staging`, `production`) |
-| `size` | Instance size (`small`, `medium`, `large`, `xlarge`) |
-| `storageGB` | Storage capacity (10–65536 GB) |
-| `ha` | High availability (boolean) |
+| Field | Description | Products |
+|-------|-------------|----------|
+| `cell` | Logical cell identifier | All |
+| `tier` | Criticality tier (`low`, `medium`, `critical`, `business_critical`) | All |
+| `environment` | Target environment (`dev`, `staging`, `production`) | All |
+| `ha` | High availability (boolean) | All |
+| `size` | Instance size (`small`, `medium`, `large`, `xlarge`) | MySQL |
+| `storageGB` | Storage capacity (10–65536 GB) | MySQL |
+| `image` | Container image to deploy | WebApp |
+| `cpu` | CPU allocation (`125m`–`4000m`) | WebApp |
+| `memory` | Memory allocation (`256Mi`–`8Gi`) | WebApp |
+| `replicas` | Number of replicas (1–20) | WebApp |
 
 The control plane decides: **provider**, **region**, **runtimeCluster**, and **network configuration**.
 
@@ -33,24 +37,25 @@ The platform is organized into three distinct layers with clear separation of co
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           DEVELOPER LAYER                                   │
 │                                                                             │
-│  Developer only specifies: cell, tier, environment, size, storageGB, ha     │
+│  Developer only specifies: cell, tier, environment, ha + product params     │
 │  Developer NEVER specifies: provider, region, runtimeCluster, network       │
 │                                                                             │
 │  ┌──────────┐   ┌──────────┐   ┌──────────┐                                │
 │  │ Web UI   │   │ curl/CLI │   │ CI/CD    │                                 │
 │  └────┬─────┘   └────┬─────┘   └────┬─────┘                                │
 │       └───────────────┴──────────────┘                                      │
-│                       │ POST /api/mysql                                     │
+│                       │ POST /api/services/<product>                        │
 ├───────────────────────┼─────────────────────────────────────────────────────┤
 │                       ▼                                                     │
 │                CONTROL PLANE LAYER  (Python/Flask)                          │
 │                                                                             │
 │  ┌─────────────┐  ┌──────────────┐  ┌────────────┐  ┌──────────────────┐   │
 │  │ Validation  │─>│ Sticky Check │─>│ Scheduler  │─>│ Claim Builder    │   │
-│  │ + Contract  │  │ (K8s lookup) │  │ Gates +    │  │ MySQLInstance    │   │
-│  │ Enforcement │  │              │  │ Weighted   │  │ Claim manifest   │   │
-│  └─────────────┘  └──────────────┘  │ Scoring    │  └───────┬──────────┘   │
-│                                     └────────────┘          │ SSA Apply    │
+│  │ + Contract  │  │ (K8s lookup) │  │ Gates +    │  │ (Generic: any    │   │
+│  │ + Product   │  │              │  │ Weighted   │  │  registered      │   │
+│  │ Registry    │  │              │  │ Scoring    │  │  product CRD)    │   │
+│  └─────────────┘  └──────────────┘  └────────────┘  └───────┬──────────┘   │
+│                                                              │ SSA Apply    │
 │  No cloud credentials here.                                 │              │
 │  Only needs K8s access (kubeconfig or ServiceAccount).      │              │
 ├─────────────────────────────────────────────────────────────┼──────────────┤
@@ -495,34 +500,197 @@ curl -X POST http://localhost:8080/api/experiments -H "Content-Type: application
 
 ---
 
+## Multi-Product Architecture
+
+The platform supports **multiple cloud products** through an extensible product registry. Each product is a `ProductDefinition` that declares its CRD coordinates, parameters, and validation rules. The scheduler, tiers, experiments, and analytics are **product-agnostic** — they work identically for any registered product.
+
+### Registered Products
+
+| Product | Kind | API Version | Description |
+|---------|------|-------------|-------------|
+| `mysql` | `MySQLInstanceClaim` | `db.platform.example.org/v1alpha1` | Managed MySQL with backups, replication, failover |
+| `postgresql` | `PostgreSQLInstanceClaim` | `db.platform.example.org/v1alpha1` | Managed PostgreSQL with extensions, JSONB, and replication |
+| `webapp` | `WebAppClaim` | `compute.platform.example.org/v1alpha1` | Web application compute with auto-scaling, LB, TLS |
+
+### How It Works
+
+```
+Developer Request
+       │
+       ▼
+┌──────────────┐     ┌───────────────┐     ┌────────────┐     ┌──────────────┐
+│ Product      │────>│ Parameter     │────>│ Scheduler  │────>│ Generic      │
+│ Registry     │     │ Validation    │     │ (same for  │     │ Claim Builder│
+│ (lookup by   │     │ (per-product  │     │  all       │     │ (from        │
+│  product     │     │  specs)       │     │  products) │     │  ProductDef) │
+│  name)       │     │               │     │            │     │              │
+└──────────────┘     └───────────────┘     └────────────┘     └──────────────┘
+```
+
+### Adding a New Product
+
+To add a new product (e.g., Redis, Load Balancer, Graph DB):
+
+**1. Define the product in `internal/products/catalog.py`:**
+
+```python
+from internal.products.registry import ProductDefinition, ParameterSpec, register_product
+
+REDIS = ProductDefinition(
+    name="redis",
+    display_name="Managed Redis Cache",
+    description="High-performance in-memory data store",
+    api_version="cache.platform.example.org/v1alpha1",
+    kind="RedisClaim",
+    composition_class="redis",
+    composition_group="cache.platform.example.org",
+    parameters=[
+        ParameterSpec(name="memory", param_type="choice",
+                      choices=("256Mi", "512Mi", "1Gi", "2Gi", "4Gi")),
+        ParameterSpec(name="replicas", param_type="int", min_value=1, max_value=6),
+        ParameterSpec(name="persistence", param_type="bool", required=False, default=False),
+    ],
+)
+register_product(REDIS)
+```
+
+**2. Install the corresponding Crossplane Composition in your cluster.**
+
+**3. Done.** The generic endpoint `POST /api/services/redis` is immediately available.
+
+### WebApp Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `image` | string | Yes | — | Container image (e.g., `registry.example.com/app:v1`) |
+| `port` | int | No | `8080` | Application listen port (1–65535) |
+| `cpu` | choice | No | `250m` | CPU: `125m`, `250m`, `500m`, `1000m`, `2000m`, `4000m` |
+| `memory` | choice | No | `512Mi` | Memory: `256Mi`, `512Mi`, `1Gi`, `2Gi`, `4Gi`, `8Gi` |
+| `replicas` | int | No | `2` | Number of replicas (1–20) |
+| `ha` | bool | No | `false` | Enable HA (enforces multi_az gate) |
+
+### Developer Flow Example
+
+A developer deploys a web application — they only specify what they need:
+
+```bash
+curl -s -X POST http://localhost:8080/api/services/webapp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "checkout-frontend",
+    "namespace": "team-checkout",
+    "cell": "cell-us-east",
+    "tier": "medium",
+    "environment": "production",
+    "image": "registry.example.com/checkout:v2.1.0",
+    "cpu": "500m",
+    "memory": "1Gi",
+    "replicas": 3
+  }'
+```
+
+Behind the scenes, the control plane:
+1. Looks up `webapp` in the product registry
+2. Validates common fields (cell, tier, environment) and product-specific params (image, cpu, memory, replicas)
+3. Checks for sticky placement (existing claim in K8s)
+4. Runs the scheduler: health filter → gate filter → HA enforcement → experiment weights → scoring → ranking
+5. Selects the best provider/region (e.g., AWS us-east-1)
+6. Builds a `WebAppClaim` manifest with the correct Crossplane composition selector
+7. Applies the claim to the cluster (or returns it in standalone mode)
+
+The developer gets back a placement decision without ever knowing which cloud provider was selected:
+
+```json
+{
+  "status": "created",
+  "product": "webapp",
+  "placement": {
+    "provider": "aws",
+    "region": "us-east-1",
+    "runtimeCluster": "eks-prod-use1"
+  },
+  "claim": {
+    "apiVersion": "compute.platform.example.org/v1alpha1",
+    "kind": "WebAppClaim",
+    "spec": {
+      "parameters": {
+        "image": "registry.example.com/checkout:v2.1.0",
+        "cpu": "500m",
+        "memory": "1Gi",
+        "replicas": 3,
+        "provider": "aws",
+        "region": "us-east-1"
+      }
+    }
+  }
+}
+```
+
+The same developer can also request a MySQL database using the **same contract pattern**:
+
+```bash
+curl -s -X POST http://localhost:8080/api/services/mysql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "checkout-db",
+    "namespace": "team-checkout",
+    "cell": "cell-us-east",
+    "tier": "medium",
+    "environment": "production",
+    "size": "large",
+    "storageGB": 100,
+    "ha": true
+  }'
+```
+
+Both products go through the **same scheduling pipeline** with the same HA enforcement, experiments, and analytics.
+
+---
+
 ## Project Structure
 
 ```
 idp-multicloud/
 ├── cmd/
 │   └── controlplane/
-│       └── main.py                 # Entry point — Flask server
+│       └── main.py                 # Entry point — Flask server + DB init
 ├── internal/
 │   ├── models/
-│   │   └── types.py                # Data types: MySQLRequest, Candidate, CircuitBreaker
+│   │   └── types.py                # Data types: MySQLRequest, ServiceRequest, Candidate
 │   ├── policy/
 │   │   └── tiers.py                # Criticality framework: tier gates and weights
 │   ├── scheduler/
 │   │   ├── scheduler.py            # Gate filter, weighted scoring, health, failover
 │   │   └── experiments.py          # A/B testing, feature flags, placement analytics
+│   ├── products/
+│   │   ├── registry.py             # Product registry: ProductDefinition, validation, claim builder
+│   │   └── catalog.py              # Product catalog: MySQL, WebApp, PostgreSQL (add new products here)
 │   ├── k8s/
-│   │   ├── client.py               # Kubernetes dynamic client (SSA, CRUD, delete)
-│   │   └── claim_builder.py        # Crossplane MySQLInstanceClaim builder
+│   │   ├── client.py               # Kubernetes dynamic client (SSA, CRUD, generic + MySQL)
+│   │   └── claim_builder.py        # Crossplane MySQLInstanceClaim builder (legacy)
+│   ├── db/
+│   │   └── database.py             # SQLite persistent state store (config, placements, sagas, DR)
+│   ├── orchestration/
+│   │   └── saga.py                 # Saga orchestrator with compensation/rollback
 │   └── handlers/
-│       └── mysql.py                # Flask API: CRUD, failover, health, experiments
+│       ├── mysql.py                # MySQL-specific API (backward compatible)
+│       ├── services.py             # Generic multi-product API: /api/services/<product>
+│       └── admin.py                # Admin API: config, providers, DR, sagas, placements
 ├── web/
-│   └── index.html                  # Minimal frontend (vanilla HTML + JS)
+│   └── index.html                  # Frontend (vanilla HTML + JS) with admin section
 ├── tests/
 │   ├── test_models.py              # Model validation tests
 │   ├── test_policy.py              # Tier framework tests
 │   ├── test_scheduler.py           # Scheduler logic tests
 │   ├── test_claim_builder.py       # Claim builder tests
-│   └── test_handlers.py            # API endpoint tests
+│   ├── test_handlers.py            # API endpoint tests (MySQL legacy)
+│   ├── test_experiments.py         # A/B testing and feature flag tests
+│   ├── test_product_registry.py    # Product registry unit tests
+│   ├── test_services.py            # Generic services endpoint tests
+│   ├── test_database.py            # SQLite state store tests
+│   ├── test_saga.py                # Saga orchestrator tests
+│   └── test_admin.py               # Admin API endpoint tests
+├── Dockerfile
 ├── requirements.txt
 └── README.md
 ```
@@ -530,6 +698,54 @@ idp-multicloud/
 ---
 
 ## API Endpoints
+
+### Generic Multi-Product Endpoints
+
+#### `GET /api/products`
+
+List all registered products and their parameter specifications.
+
+```json
+{
+  "products": [
+    {
+      "name": "mysql",
+      "display_name": "Managed MySQL",
+      "description": "Managed MySQL database with automatic backups, replication, and failover.",
+      "kind": "MySQLInstanceClaim",
+      "parameters": [
+        {"name": "size", "type": "choice", "required": true, "choices": ["small","medium","large","xlarge"]},
+        {"name": "storageGB", "type": "int", "required": true},
+        {"name": "ha", "type": "bool", "required": false, "default": false}
+      ]
+    },
+    {
+      "name": "webapp",
+      "display_name": "Web Application",
+      "kind": "WebAppClaim",
+      "parameters": [
+        {"name": "image", "type": "string", "required": true},
+        {"name": "cpu", "type": "choice", "required": false, "choices": ["125m","250m","500m","1000m","2000m","4000m"]},
+        {"name": "replicas", "type": "int", "required": false, "default": 2}
+      ]
+    }
+  ]
+}
+```
+
+#### `POST /api/services/<product>`
+
+Create a service instance for any registered product. Same scheduling pipeline for all products.
+
+#### `GET /api/services/<product>/<namespace>/<name>`
+
+Query the status of an existing claim for any product.
+
+#### `POST /api/services/<product>/<namespace>/<name>/failover`
+
+Force rescheduling of an existing claim (override sticky placement) for any product.
+
+### Legacy MySQL Endpoint
 
 ### `GET /health`
 
@@ -726,6 +942,15 @@ Delete a feature flag.
 - Python 3.10+
 - pip
 
+### Key Dependencies
+
+| Package | Version | Purpose |
+|---------|---------|---------|
+| `flask` | >= 3.0.0 | HTTP API framework |
+| `kubernetes` | >= 28.0.0 | Kubernetes client (optional — standalone mode works without it) |
+| `pyyaml` | >= 6.0 | YAML parsing |
+| `pytest` | >= 7.0.0 | Test framework |
+
 ### Install dependencies
 
 ```bash
@@ -740,13 +965,38 @@ python cmd/controlplane/main.py
 
 The server starts on `http://localhost:8080`. The web UI is at `http://localhost:8080/web/`.
 
-Environment variables:
+### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `IDP_HOST` | `0.0.0.0` | Listen address |
 | `IDP_PORT` | `8080` | Listen port |
 | `IDP_DEBUG` | `false` | Enable Flask debug mode |
+| `IDP_DB_PATH` | `idp.db` | SQLite database file path. Set to a persistent location to preserve state across restarts |
+
+### Persistent State (SQLite)
+
+All platform configuration (cloud providers, DR policies, saga settings), placement history, experiments, and feature flags are stored in a **SQLite database**. By default the file is `idp.db` in the working directory.
+
+To preserve all settings and history across code reloads or container restarts, set `IDP_DB_PATH` to a persistent location:
+
+```bash
+# Linux / WSL — store in home directory
+export IDP_DB_PATH=~/idp-data/idp.db
+mkdir -p ~/idp-data
+python cmd/controlplane/main.py
+
+# Docker — mount a volume for the database
+docker run -p 8080:8080 \
+  -v idp-data:/data \
+  -e IDP_DB_PATH=/data/idp.db \
+  idp-controlplane:latest
+```
+
+When starting, the control plane automatically:
+1. Creates all tables if the database doesn't exist
+2. Seeds default provider configs (AWS, GCP, OCI), DR policies, and saga settings
+3. Preserves any previously saved configs — seed only inserts if rows don't exist
 
 ### Run tests
 
@@ -757,6 +1007,175 @@ python -m pytest tests/ -v
 ### Standalone mode
 
 Without a Kubernetes cluster, the API runs in **standalone mode**: claims are generated and returned in the response but not applied to a cluster. This is the expected behavior for local development.
+
+### WSL2 Local Setup (Docker + Minikube)
+
+Full guide for running the IDP control plane on Windows WSL2 with a local Kubernetes cluster.
+
+#### Prerequisites
+
+| Tool | Install |
+|------|---------|
+| **Docker** | Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) and enable **WSL 2 integration** in Settings > Resources > WSL Integration |
+| **kubectl** | `curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && sudo install kubectl /usr/local/bin/` |
+| **minikube** | `curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64 && sudo install minikube-linux-amd64 /usr/local/bin/minikube` |
+| **helm** | `curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 \| bash` |
+
+> **Note:** `systemctl` does not work in WSL2 by default (`System has not been booted with systemd`). Docker Desktop handles the Docker daemon externally — you don't need systemd.
+
+#### Step 1: Verify Docker is accessible
+
+```bash
+docker ps
+# Should list containers (or an empty table). If you get "Cannot connect to the Docker daemon",
+# open Docker Desktop for Windows and ensure it's running with WSL integration enabled.
+```
+
+#### Step 2: Start Minikube
+
+Minikube in WSL2 can fail during addon validation if the API server isn't fully ready. Use this two-phase start:
+
+```bash
+# Phase 1: Create the cluster container without Kubernetes (avoids OpenAPI validation timeout)
+minikube start --driver=docker --no-kubernetes
+
+# Phase 2: Start Kubernetes with explicit config
+minikube start --driver=docker \
+  --kubernetes-version=v1.35.0 \
+  --addons= \
+  --extra-config=apiserver.bind-address=0.0.0.0
+```
+
+#### Step 3: Verify the cluster
+
+```bash
+# Check kubectl context points to minikube
+kubectl config current-context
+# → minikube
+
+# Verify API server is reachable
+kubectl cluster-info
+# → Kubernetes control plane is running at https://127.0.0.1:<port>
+
+# Verify node is Ready
+kubectl get nodes -o wide
+# → minikube   Ready   control-plane   ...
+```
+
+#### Step 4: Enable storage addons
+
+```bash
+minikube addons enable default-storageclass
+minikube addons enable storage-provisioner
+```
+
+#### Step 5: Build and deploy the control plane
+
+```bash
+# Build the container image
+docker build -t idp-controlplane:latest .
+
+# Load into minikube (avoids needing a remote registry)
+minikube image load idp-controlplane:latest
+
+# Create deployment + service
+kubectl create deployment idp-controlplane --image=idp-controlplane:latest
+kubectl expose deployment idp-controlplane --port=8080
+
+# Force local image (don't pull from registry)
+kubectl patch deployment idp-controlplane \
+  -p '{"spec":{"template":{"spec":{"containers":[{"name":"idp-controlplane","imagePullPolicy":"IfNotPresent"}]}}}}'
+
+# Apply RBAC for Crossplane claims
+kubectl apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idp-controlplane
+rules:
+  - apiGroups: ["db.platform.example.org"]
+    resources: ["mysqlinstanceclaims", "postgresqlinstanceclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["compute.platform.example.org"]
+    resources: ["webappclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: idp-controlplane
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: idp-controlplane
+  apiGroup: rbac.authorization.k8s.io
+EOF
+
+# Wait for pod to be ready
+kubectl rollout status deployment/idp-controlplane --timeout=60s
+```
+
+#### Step 6: Access the API
+
+```bash
+kubectl port-forward svc/idp-controlplane 8080:8080
+# → Open http://localhost:8080/web/ in your browser
+```
+
+If using an updated image, rebuild and redeploy:
+
+```bash
+docker build -t idp-controlplane:latest .
+minikube image load idp-controlplane:latest
+kubectl rollout restart deployment/idp-controlplane
+kubectl rollout status deployment/idp-controlplane --timeout=60s
+```
+
+#### Crossplane Setup
+
+**Verify existing installation:**
+
+```bash
+kubectl get pods -n crossplane-system
+# Should show: crossplane, crossplane-rbac-manager, and provider pods Running
+```
+
+**Install or upgrade Crossplane (idempotent):**
+
+```bash
+helm repo add crossplane-stable https://charts.crossplane.io/stable
+helm repo update
+helm upgrade --install crossplane crossplane-stable/crossplane \
+  --namespace crossplane-system --create-namespace --wait
+```
+
+> Use `helm upgrade --install` instead of `helm install` — it works whether Crossplane is already installed or not.
+
+**Full reinstall (if needed):**
+
+```bash
+helm uninstall crossplane -n crossplane-system
+kubectl delete namespace crossplane-system
+# Then re-run the install command above
+```
+
+#### Troubleshooting
+
+| Error Message | Cause | Solution |
+|---------------|-------|----------|
+| `Cannot connect to the Docker daemon at unix:///var/run/docker.sock` | Docker Desktop is not running or WSL integration is disabled | Open Docker Desktop for Windows. Go to Settings > Resources > WSL Integration and enable your distro |
+| `System has not been booted with systemd as init system` | WSL2 doesn't use systemd by default. `systemctl start docker` won't work | Don't use `systemctl`. Docker Desktop manages the daemon. Verify with `docker ps` |
+| `Kubernetes cluster unreachable ... connect: connection refused` | The API server isn't running. kubeconfig points to `https://127.0.0.1:<port>` but nothing is listening | Run `minikube start --driver=docker`. If it was already started, run `minikube stop && minikube start --driver=docker` |
+| `cannot re-use a name that is still in use` (helm) | `helm install` fails because the release already exists | Use `helm upgrade --install` instead of `helm install`. Or uninstall first: `helm uninstall <name> -n <namespace>` |
+| `socat ... connect(5, AF=2 127.0.0.1:8080): Connection refused` during port-forward | The pod is not listening on port 8080. It's either crashing or hasn't started yet | Check pod status: `kubectl get pods` and `kubectl logs deploy/idp-controlplane`. Common causes: image not loaded (`ImagePullBackOff`), missing RBAC, crash during K8s client init. Rebuild and reload the image if needed |
+| `ImagePullBackOff` or `ErrImagePull` | minikube can't find the local image | Run `minikube image load idp-controlplane:latest` and ensure `imagePullPolicy: IfNotPresent` is set |
+| `CrashLoopBackOff` | The pod keeps crashing on startup | Check logs: `kubectl logs deploy/idp-controlplane --previous`. Usually a Python import error or K8s client issue. The app handles K8s unavailability gracefully — check if all dependencies are installed in the image |
 
 ---
 
@@ -805,6 +1224,47 @@ curl -s http://localhost:8080/api/status/mysql/default/orders-db | python -m jso
 
 ```bash
 curl -s http://localhost:8080/health
+```
+
+### List available products
+
+```bash
+curl -s http://localhost:8080/api/products | python -m json.tool
+```
+
+### Create a WebApp (generic endpoint)
+
+```bash
+curl -s -X POST http://localhost:8080/api/services/webapp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "checkout-frontend",
+    "namespace": "team-checkout",
+    "cell": "cell-us-east",
+    "tier": "medium",
+    "environment": "production",
+    "image": "registry.example.com/checkout:v2.1.0",
+    "cpu": "500m",
+    "memory": "1Gi",
+    "replicas": 3
+  }' | python -m json.tool
+```
+
+### Create MySQL via generic endpoint
+
+```bash
+curl -s -X POST http://localhost:8080/api/services/mysql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "orders-db",
+    "namespace": "default",
+    "cell": "cell-us-east",
+    "tier": "medium",
+    "environment": "production",
+    "size": "large",
+    "storageGB": 100,
+    "ha": true
+  }' | python -m json.tool
 ```
 
 ---
@@ -1013,30 +1473,42 @@ Create the Secrets and ProviderConfigs for each cloud provider (see [Cloud Provi
 
 ```bash
 # Example: create AWS credentials from a file
-kubectl create secret generic aws-credentials \
-  --namespace crossplane-system \
+kubectl -n crossplane-system create secret generic aws-credentials \
   --from-file=credentials=./aws-credentials.ini
 
 # Apply the ProviderConfig
-kubectl apply -f provider-config-aws.yaml
+kubectl apply -f - <<EOF
+apiVersion: aws.upbound.io/v1beta1
+kind: ProviderConfig
+metadata:
+  name: default
+spec:
+  credentials:
+    source: Secret
+    secretRef:
+      namespace: crossplane-system
+      name: aws-credentials
+      key: credentials
+EOF
 ```
 
 Repeat for GCP and OCI.
 
-### Step 4: Install the MySQLInstanceClaim CRD
+### Step 4: Create XRD (Composite + Claim)
 
 The Crossplane XRD (CompositeResourceDefinition) defines the claim schema:
 
-```yaml
+```bash
+cat > xrd-mysql.yaml <<'EOF'
 apiVersion: apiextensions.crossplane.io/v1
 kind: CompositeResourceDefinition
 metadata:
-  name: mysqlinstanceclaims.db.platform.example.org
+  name: xmysqlinstances.db.platform.example.org
 spec:
   group: db.platform.example.org
   names:
-    kind: MySQLInstanceClaim
-    plural: mysqlinstanceclaims
+    kind: XMySQLInstance
+    plural: xmysqlinstances
   claimNames:
     kind: MySQLInstanceClaim
     plural: mysqlinstanceclaims
@@ -1053,19 +1525,47 @@ spec:
               properties:
                 parameters:
                   type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                compositionSelector:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                writeConnectionSecretToRef:
+                  type: object
                   properties:
-                    cell: { type: string }
-                    environment: { type: string }
-                    tier: { type: string }
-                    provider: { type: string }
-                    region: { type: string }
-                    size: { type: string }
-                    storageGB: { type: integer }
-                    ha: { type: boolean }
-                    network: { type: object }
+                    name:
+                      type: string
+                  required:
+                    - name
+              required:
+                - parameters
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+EOF
+
+kubectl apply -f xrd-mysql.yaml
+
+# Verify
+kubectl api-resources | grep mysql
 ```
 
 ### Step 5: Create Compositions (one per provider)
+
+Install the Composition Function (Pipeline Mode):
+
+```bash
+cat > function-patch-and-transform.yaml <<'EOF'
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: function-patch-and-transform
+spec:
+  package: xpkg.upbound.io/crossplane-contrib/function-patch-and-transform:v0.8.2
+EOF
+
+kubectl apply -f function-patch-and-transform.yaml
+kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
+```
 
 Each Composition maps a `MySQLInstanceClaim` to provider-specific managed resources:
 
@@ -1157,6 +1657,14 @@ docker build -t idp-controlplane:latest .
 kubectl create deployment idp-controlplane --image=idp-controlplane:latest
 kubectl expose deployment idp-controlplane --port=8080
 
+#If deployment already exists
+kubectl set image deployment/idp-controlplane idp-controlplane=idp-controlplane:latest
+kubectl rollout restart deployment/idp-controlplane
+#Prevent Kubernetes from trying to pull from a remote registry
+kubectl patch deployment idp-controlplane \
+  -p '{"spec":{"template":{"spec":{"containers":[{"name":"idp-controlplane","imagePullPolicy":"IfNotPresent"}]}}}}'
+
+
 # The control plane needs RBAC to manage MySQLInstanceClaims
 kubectl apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
@@ -1165,11 +1673,14 @@ metadata:
   name: idp-controlplane
 rules:
   - apiGroups: ["db.platform.example.org"]
-    resources: ["mysqlinstanceclaims"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    resources: ["mysqlinstanceclaims", "postgresqlinstanceclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["compute.platform.example.org"]
+    resources: ["webappclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get"]  # only check existence, never read data
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -1184,6 +1695,12 @@ roleRef:
   name: idp-controlplane
   apiGroup: rbac.authorization.k8s.io
 EOF
+```
+
+Access the Control Plane API via port-forward:
+
+```bash
+kubectl port-forward svc/idp-controlplane 8080:8080
 ```
 
 ### End-to-End Verification
@@ -1212,6 +1729,10 @@ kubectl get mysqlinstanceclaim test-db \
 
 ## Next Steps
 
+### More Products
+- Add Redis, Load Balancer, Graph DB, Cache products to `catalog.py`.
+- Each product only requires a `ProductDefinition` + Crossplane Composition.
+
 ### AuthN / AuthZ
 - Integrate OIDC/OAuth2 for API authentication.
 - Implement RBAC to restrict which teams can provision to which cells and tiers.
@@ -1227,14 +1748,7 @@ kubectl get mysqlinstanceclaim test-db \
 - Export Prometheus metrics: scheduling latency, placement distribution, gate rejection rates.
 - Build Grafana dashboards for control plane observability.
 
-### DR / Fallback Patterns
-- Implement automatic provider fallback when a region is unavailable.
-- Add circuit breakers for cloud provider API failures.
-- Support cross-region failover for `business_critical` tier instances.
-- Implement placement migration for disaster recovery scenarios.
-
 ### Additional Features
-- Support for PostgreSQL, Redis, and other managed services.
 - Multi-cluster federation for global placement.
 - Cost estimation and chargeback integration.
 - GitOps workflow integration (ArgoCD, Flux).

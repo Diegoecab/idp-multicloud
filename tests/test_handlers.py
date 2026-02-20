@@ -3,16 +3,13 @@
 import json
 import os
 import sys
+import tempfile
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 import pytest
-
-# Import create_app from main — it needs PROJECT_ROOT on sys.path
-sys.path.insert(0, os.path.join(PROJECT_ROOT, "cmd", "controlplane"))
-from main import create_app
 
 from internal.scheduler.scheduler import (
     _provider_health, _provider_circuit_breakers,
@@ -23,9 +20,36 @@ from internal.scheduler.experiments import (
 )
 
 
+@pytest.fixture(autouse=True)
+def temp_db():
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    from internal.db import database
+    database.init_db(path)
+    database.seed_defaults()
+    for prov in ("aws", "gcp", "oci"):
+        database.save_provider_credentials(prov, "access_key", {"test": True})
+    yield path
+    os.unlink(path)
+
+
 @pytest.fixture
 def client():
-    app = create_app()
+    from flask import Flask
+    from internal.handlers.mysql import mysql_bp
+    from internal.handlers.services import services_bp
+    from internal.handlers.admin import admin_bp
+    import internal.products.catalog  # noqa: F401
+
+    app = Flask(__name__)
+    app.register_blueprint(mysql_bp)
+    app.register_blueprint(services_bp)
+    app.register_blueprint(admin_bp)
+
+    @app.route("/")
+    def root():
+        return {"service": "idp-multicloud-controlplane", "status": "running"}, 200
+
     app.config["TESTING"] = True
     with app.test_client() as c:
         yield c

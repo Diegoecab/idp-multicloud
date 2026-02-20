@@ -3,205 +3,729 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>IDP Multicloud — MySQL Provisioning</title>
+  <title>IDP Multicloud</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
       background: #0f172a; color: #e2e8f0;
-      padding: 2rem; line-height: 1.6;
+      display: flex; height: 100vh; overflow: hidden;
     }
-    h1 { color: #38bdf8; margin-bottom: 0.5rem; }
-    h2 { color: #94a3b8; font-size: 1rem; margin-bottom: 1.5rem; font-weight: 400; }
-    h3 { color: #38bdf8; margin-bottom: 1rem; font-size: 1.1rem; }
-    .container { max-width: 900px; margin: 0 auto; }
+
+    /* ── Sidebar ─────────────────────────────────────────── */
+    .sidebar {
+      width: 240px; min-width: 240px;
+      background: #1e293b; border-right: 1px solid #334155;
+      display: flex; flex-direction: column;
+      overflow-y: auto;
+    }
+    .sidebar-header {
+      padding: 1.25rem 1rem; border-bottom: 1px solid #334155;
+    }
+    .sidebar-header h1 {
+      font-size: 1.1rem; color: #38bdf8; font-weight: 700;
+    }
+    .sidebar-header p {
+      font-size: 0.7rem; color: #64748b; margin-top: 0.25rem;
+    }
+    .nav-section { padding: 0.75rem 0; }
+    .nav-section-title {
+      font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em;
+      color: #64748b; padding: 0 1rem; margin-bottom: 0.35rem; font-weight: 600;
+    }
+    .nav-item {
+      display: flex; align-items: center; gap: 0.6rem;
+      padding: 0.5rem 1rem; cursor: pointer;
+      color: #94a3b8; font-size: 0.85rem; transition: all 0.15s;
+      border-left: 3px solid transparent;
+    }
+    .nav-item:hover { background: #334155; color: #e2e8f0; }
+    .nav-item.active {
+      background: #0f172a; color: #38bdf8;
+      border-left-color: #38bdf8;
+    }
+    .nav-icon { width: 16px; text-align: center; font-size: 0.8rem; }
+    .nav-badge {
+      margin-left: auto; background: #0284c7; color: #fff;
+      font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 8px;
+    }
+
+    /* ── Main Content ────────────────────────────────────── */
+    .main { flex: 1; overflow-y: auto; padding: 1.5rem 2rem; }
+    .page { display: none; }
+    .page.active { display: block; }
+
+    .page-title { color: #f1f5f9; font-size: 1.4rem; margin-bottom: 0.25rem; }
+    .page-subtitle { color: #64748b; font-size: 0.85rem; margin-bottom: 1.5rem; }
+
+    /* ── Cards Grid ──────────────────────────────────────── */
+    .cards-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 1rem;
+    }
+    .card {
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: 8px; padding: 1.25rem; cursor: pointer;
+      transition: all 0.2s; position: relative;
+    }
+    .card:hover { border-color: #38bdf8; transform: translateY(-2px); }
+    .card-icon {
+      width: 40px; height: 40px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.2rem; margin-bottom: 0.75rem;
+    }
+    .card-icon.db { background: #1e3a5f; color: #38bdf8; }
+    .card-icon.compute { background: #1a3a2a; color: #4ade80; }
+    .card-icon.cache { background: #3b1f4a; color: #c084fc; }
+    .card-icon.lb { background: #3a2a1a; color: #fb923c; }
+    .card-icon.generic { background: #2a2a3a; color: #94a3b8; }
+    .card h3 { font-size: 0.95rem; color: #f1f5f9; margin-bottom: 0.35rem; }
+    .card p { font-size: 0.78rem; color: #64748b; line-height: 1.4; }
+    .card-tag {
+      position: absolute; top: 0.75rem; right: 0.75rem;
+      font-size: 0.6rem; padding: 0.15rem 0.5rem; border-radius: 4px;
+      text-transform: uppercase; font-weight: 600;
+    }
+    .card-tag.available { background: #064e3b; color: #34d399; }
+    .card-tag.soon { background: #451a03; color: #fbbf24; }
+
+    /* ── Form Panel ──────────────────────────────────────── */
     .panel {
       background: #1e293b; border: 1px solid #334155;
       border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem;
     }
-    label { display: block; margin-bottom: 0.25rem; color: #94a3b8; font-size: 0.875rem; }
+    .panel-header {
+      display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem;
+    }
+    .panel-header h3 { color: #f1f5f9; font-size: 1.1rem; }
+    .panel-header .back-btn {
+      background: none; border: 1px solid #475569; color: #94a3b8;
+      padding: 0.3rem 0.6rem; border-radius: 4px; cursor: pointer;
+      font-size: 0.75rem;
+    }
+    .panel-header .back-btn:hover { background: #334155; color: #e2e8f0; }
+    label { display: block; margin-bottom: 0.25rem; color: #94a3b8; font-size: 0.8rem; }
     input, select {
       width: 100%; padding: 0.5rem 0.75rem;
       background: #0f172a; border: 1px solid #475569;
-      border-radius: 4px; color: #e2e8f0; font-size: 0.9rem;
-      margin-bottom: 0.75rem;
+      border-radius: 4px; color: #e2e8f0; font-size: 0.85rem;
+      margin-bottom: 0.85rem;
     }
     input:focus, select:focus { outline: none; border-color: #38bdf8; }
     .row { display: flex; gap: 1rem; }
     .row > div { flex: 1; }
-    .checkbox-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .checkbox-row { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.85rem; }
     .checkbox-row input { width: auto; margin: 0; }
-    button {
+    .checkbox-row label { margin: 0; }
+    .form-hint { font-size: 0.7rem; color: #475569; margin-top: -0.5rem; margin-bottom: 0.75rem; }
+
+    button.primary {
       background: #0284c7; color: #fff; border: none;
       padding: 0.6rem 1.5rem; border-radius: 4px;
-      cursor: pointer; font-size: 0.9rem; font-weight: 500;
+      cursor: pointer; font-size: 0.85rem; font-weight: 500;
     }
-    button:hover { background: #0369a1; }
-    button:disabled { background: #475569; cursor: not-allowed; }
-    pre {
+    button.primary:hover { background: #0369a1; }
+    button.primary:disabled { background: #475569; cursor: not-allowed; }
+
+    button.secondary {
+      background: transparent; color: #94a3b8; border: 1px solid #475569;
+      padding: 0.6rem 1.5rem; border-radius: 4px;
+      cursor: pointer; font-size: 0.85rem;
+    }
+    button.secondary:hover { background: #334155; color: #e2e8f0; }
+
+    /* ── Result ───────────────────────────────────────────── */
+    pre.result {
       background: #0f172a; border: 1px solid #334155;
       border-radius: 4px; padding: 1rem; margin-top: 1rem;
-      overflow-x: auto; font-size: 0.8rem; max-height: 500px;
+      overflow-x: auto; font-size: 0.75rem; max-height: 500px;
       overflow-y: auto; white-space: pre-wrap; word-break: break-word;
     }
     .status-ok { color: #4ade80; }
     .status-err { color: #f87171; }
-    .info { color: #94a3b8; font-size: 0.8rem; margin-top: 0.5rem; }
-    hr { border: none; border-top: 1px solid #334155; margin: 1.5rem 0; }
+
+    /* ── Dashboard Widgets ────────────────────────────────── */
+    .stats-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 1rem; margin-bottom: 1.5rem;
+    }
+    .stat-card {
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: 8px; padding: 1rem;
+    }
+    .stat-card .stat-label { font-size: 0.7rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-card .stat-value { font-size: 1.5rem; color: #f1f5f9; font-weight: 700; margin-top: 0.25rem; }
+    .stat-card .stat-sub { font-size: 0.7rem; color: #94a3b8; margin-top: 0.15rem; }
+
+    .provider-bar {
+      display: flex; height: 8px; border-radius: 4px; overflow: hidden;
+      margin-top: 0.5rem;
+    }
+    .provider-bar .segment-aws { background: #f59e0b; }
+    .provider-bar .segment-gcp { background: #3b82f6; }
+    .provider-bar .segment-oci { background: #ef4444; }
+
+    .health-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 0.75rem; margin-bottom: 1.5rem;
+    }
+    .health-card {
+      background: #1e293b; border: 1px solid #334155;
+      border-radius: 8px; padding: 0.85rem; text-align: center;
+    }
+    .health-card .provider-name { font-size: 0.85rem; font-weight: 600; color: #f1f5f9; }
+    .health-dot {
+      display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+      margin-right: 0.35rem; vertical-align: middle;
+    }
+    .health-dot.healthy { background: #4ade80; }
+    .health-dot.unhealthy { background: #f87171; }
+    .health-card .cb-state { font-size: 0.7rem; color: #64748b; margin-top: 0.25rem; }
+
+    /* ── Table ────────────────────────────────────────────── */
+    table {
+      width: 100%; border-collapse: collapse;
+      background: #1e293b; border: 1px solid #334155; border-radius: 8px;
+      overflow: hidden;
+    }
+    th { text-align: left; padding: 0.6rem 1rem; background: #0f172a; color: #64748b; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    td { padding: 0.6rem 1rem; border-top: 1px solid #334155; font-size: 0.8rem; color: #e2e8f0; }
+
+    /* ── Query Status ─────────────────────────────────────── */
+    .inline-form { display: flex; gap: 0.75rem; align-items: flex-end; margin-bottom: 1rem; }
+    .inline-form > div { flex: 1; }
+    .inline-form button { margin-bottom: 0.85rem; white-space: nowrap; }
+
+    /* ── Responsive ───────────────────────────────────────── */
+    @media (max-width: 768px) {
+      .sidebar { width: 56px; min-width: 56px; }
+      .sidebar-header h1, .sidebar-header p,
+      .nav-section-title, .nav-item span, .nav-badge { display: none; }
+      .nav-item { justify-content: center; padding: 0.75rem; }
+      .main { padding: 1rem; }
+    }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>IDP Multicloud</h1>
-    <h2>Cell-based MySQL Provisioning Control Plane</h2>
 
-    <!-- Create MySQL Instance -->
-    <div class="panel">
-      <h3>Create MySQL Instance</h3>
-      <form id="createForm">
-        <div class="row">
-          <div>
-            <label for="name">Name</label>
-            <input type="text" id="name" placeholder="my-app-db" required>
-          </div>
-          <div>
-            <label for="namespace">Namespace</label>
-            <input type="text" id="namespace" value="default">
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label for="cell">Cell</label>
-            <input type="text" id="cell" placeholder="cell-us-east" required>
-          </div>
-          <div>
-            <label for="tier">Tier</label>
-            <select id="tier">
-              <option value="low">low (strictest SLA)</option>
-              <option value="medium" selected>medium (balanced)</option>
-              <option value="critical">critical (cost-optimized)</option>
-              <option value="business_critical">business_critical (max resilience)</option>
-            </select>
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label for="environment">Environment</label>
-            <select id="environment">
-              <option value="dev">dev</option>
-              <option value="staging">staging</option>
-              <option value="production">production</option>
-            </select>
-          </div>
-          <div>
-            <label for="size">Size</label>
-            <select id="size">
-              <option value="small">small</option>
-              <option value="medium">medium</option>
-              <option value="large">large</option>
-              <option value="xlarge">xlarge</option>
-            </select>
-          </div>
-        </div>
-        <div class="row">
-          <div>
-            <label for="storageGB">Storage (GB)</label>
-            <input type="number" id="storageGB" value="50" min="10" max="65536">
-          </div>
-          <div>
-            <div class="checkbox-row" style="margin-top: 1.5rem;">
-              <input type="checkbox" id="ha" checked>
-              <label for="ha" style="margin: 0;">High Availability</label>
-            </div>
-          </div>
-        </div>
-        <button type="submit" id="createBtn">Create MySQL Instance</button>
-        <p class="info">
-          The control plane decides provider, region, and runtime cluster.
-          You only specify the cell contract.
-        </p>
-      </form>
-      <div id="createResult"></div>
+  <!-- ═══ SIDEBAR ═══ -->
+  <nav class="sidebar">
+    <div class="sidebar-header">
+      <h1>IDP Multicloud</h1>
+      <p>Internal Developer Platform</p>
     </div>
 
-    <hr>
+    <div class="nav-section">
+      <div class="nav-section-title">Overview</div>
+      <div class="nav-item active" data-page="dashboard">
+        <span class="nav-icon">&#9632;</span>
+        <span>Dashboard</span>
+      </div>
+    </div>
 
-    <!-- Query Status -->
-    <div class="panel">
-      <h3>Query Instance Status</h3>
-      <form id="statusForm">
-        <div class="row">
-          <div>
-            <label for="statusNs">Namespace</label>
-            <input type="text" id="statusNs" value="default">
-          </div>
-          <div>
-            <label for="statusName">Name</label>
-            <input type="text" id="statusName" placeholder="my-app-db" required>
-          </div>
+    <div class="nav-section">
+      <div class="nav-section-title">Services</div>
+      <div class="nav-item" data-page="catalog">
+        <span class="nav-icon">&#9776;</span>
+        <span>Service Catalog</span>
+      </div>
+      <div class="nav-item" data-page="create">
+        <span class="nav-icon">&#43;</span>
+        <span>Create Service</span>
+      </div>
+      <div class="nav-item" data-page="status">
+        <span class="nav-icon">&#128269;</span>
+        <span>Query Status</span>
+      </div>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Operations</div>
+      <div class="nav-item" data-page="dr-replication">
+        <span class="nav-icon">&#8644;</span>
+        <span>DR Replication</span>
+      </div>
+      <div class="nav-item" data-page="providers">
+        <span class="nav-icon">&#9729;</span>
+        <span>Providers</span>
+      </div>
+      <div class="nav-item" data-page="experiments">
+        <span class="nav-icon">&#9881;</span>
+        <span>Experiments</span>
+      </div>
+      <div class="nav-item" data-page="flags">
+        <span class="nav-icon">&#9873;</span>
+        <span>Feature Flags</span>
+      </div>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Admin</div>
+      <div class="nav-item" data-page="admin-credentials">
+        <span class="nav-icon">&#128273;</span>
+        <span>Credentials</span>
+      </div>
+      <div class="nav-item" data-page="admin-providers">
+        <span class="nav-icon">&#9881;</span>
+        <span>Cloud Providers</span>
+      </div>
+      <div class="nav-item" data-page="admin-dr">
+        <span class="nav-icon">&#9888;</span>
+        <span>DR Policies</span>
+      </div>
+      <div class="nav-item" data-page="admin-config">
+        <span class="nav-icon">&#8942;</span>
+        <span>Platform Config</span>
+      </div>
+      <div class="nav-item" data-page="admin-audit">
+        <span class="nav-icon">&#128220;</span>
+        <span>Audit Log</span>
+      </div>
+      <div class="nav-item" data-page="admin-sagas">
+        <span class="nav-icon">&#8634;</span>
+        <span>Saga History</span>
+      </div>
+      <div class="nav-item" data-page="admin-placements">
+        <span class="nav-icon">&#9993;</span>
+        <span>Placement History</span>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ═══ MAIN CONTENT ═══ -->
+  <div class="main">
+
+    <!-- ── Dashboard ── -->
+    <div id="page-dashboard" class="page active">
+      <h2 class="page-title">Dashboard</h2>
+      <p class="page-subtitle">Platform overview and placement analytics</p>
+
+      <div class="stats-grid" id="dashboard-stats">
+        <div class="stat-card">
+          <div class="stat-label">Total Placements</div>
+          <div class="stat-value" id="stat-total">-</div>
         </div>
-        <button type="submit" id="statusBtn">Query Status</button>
-      </form>
-      <div id="statusResult"></div>
+        <div class="stat-card">
+          <div class="stat-label">Gate Rejection Rate</div>
+          <div class="stat-value" id="stat-rejection">-</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Products Available</div>
+          <div class="stat-value" id="stat-products">-</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Active Experiments</div>
+          <div class="stat-value" id="stat-experiments">-</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Provider Health</h3>
+        <div class="health-grid" id="dashboard-health"></div>
+      </div>
+
+      <div class="panel">
+        <h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Provider Distribution</h3>
+        <div class="provider-bar" id="dashboard-bar"></div>
+        <div id="dashboard-distribution" style="margin-top:0.75rem;"></div>
+      </div>
+    </div>
+
+    <!-- ── Service Catalog ── -->
+    <div id="page-catalog" class="page">
+      <h2 class="page-title">Service Catalog</h2>
+      <p class="page-subtitle">Available cloud services managed by the platform</p>
+      <div class="cards-grid" id="catalog-grid"></div>
+    </div>
+
+    <!-- ── Create Service ── -->
+    <div id="page-create" class="page">
+      <h2 class="page-title">Create Service</h2>
+      <p class="page-subtitle">Select a service type to provision</p>
+
+      <!-- Product Selection (card grid) -->
+      <div id="create-select" class="cards-grid"></div>
+
+      <!-- Dynamic Form (hidden until product selected) -->
+      <div id="create-form-wrapper" style="display:none;">
+        <div class="panel">
+          <div class="panel-header">
+            <button class="back-btn" id="create-back">&larr; Back</button>
+            <h3 id="create-form-title">Create Service</h3>
+          </div>
+
+          <form id="createForm">
+            <!-- Common fields -->
+            <div class="row">
+              <div>
+                <label for="svc-name">Name</label>
+                <input type="text" id="svc-name" placeholder="my-service" required>
+              </div>
+              <div>
+                <label for="svc-namespace">Namespace</label>
+                <input type="text" id="svc-namespace" value="default">
+              </div>
+            </div>
+            <div class="row">
+              <div>
+                <label for="svc-cell">Cell</label>
+                <input type="text" id="svc-cell" placeholder="cell-us-east" required>
+              </div>
+              <div>
+                <label for="svc-tier">Tier</label>
+                <select id="svc-tier">
+                  <option value="low">low (strict SLA)</option>
+                  <option value="medium" selected>medium (balanced)</option>
+                  <option value="critical">critical (cost-optimized)</option>
+                  <option value="business_critical">business_critical (max resilience)</option>
+                </select>
+              </div>
+            </div>
+            <div class="row">
+              <div>
+                <label for="svc-env">Environment</label>
+                <select id="svc-env">
+                  <option value="dev">dev</option>
+                  <option value="staging">staging</option>
+                  <option value="production" selected>production</option>
+                </select>
+              </div>
+              <div>
+                <div class="checkbox-row" style="margin-top:1.5rem;">
+                  <input type="checkbox" id="svc-ha">
+                  <label for="svc-ha">High Availability</label>
+                </div>
+              </div>
+            </div>
+
+            <hr style="border:none;border-top:1px solid #334155;margin:0.75rem 0 1rem;">
+
+            <!-- Product-specific params (injected dynamically) -->
+            <div id="product-params"></div>
+
+            <hr style="border:none;border-top:1px solid #334155;margin:0.75rem 0 1rem;">
+            <div class="checkbox-row">
+              <input type="checkbox" id="svc-multicloud">
+              <label for="svc-multicloud" style="font-weight:600;">Multi-Cloud Deploy (active-active)</label>
+            </div>
+            <div id="multicloud-opts" style="display:none;">
+              <label>Target Providers (select multiple)</label>
+              <div style="display:flex;gap:1rem;margin-bottom:0.85rem;">
+                <div class="checkbox-row"><input type="checkbox" id="mc-aws" checked><label for="mc-aws">AWS</label></div>
+                <div class="checkbox-row"><input type="checkbox" id="mc-gcp" checked><label for="mc-gcp">GCP</label></div>
+                <div class="checkbox-row"><input type="checkbox" id="mc-oci"><label for="mc-oci">OCI</label></div>
+              </div>
+            </div>
+
+            <button type="submit" class="primary" id="createBtn">Create</button>
+            <p style="font-size:0.7rem;color:#475569;margin-top:0.5rem;">
+              The control plane decides provider, region, and runtime cluster.
+              You only specify the cell contract.
+            </p>
+          </form>
+          <div id="createResult"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Query Status ── -->
+    <div id="page-status" class="page">
+      <h2 class="page-title">Query Status</h2>
+      <p class="page-subtitle">Look up an existing service instance</p>
+      <div class="panel">
+        <form id="statusForm">
+          <div class="row">
+            <div>
+              <label for="status-product">Product</label>
+              <select id="status-product"></select>
+            </div>
+            <div>
+              <label for="status-ns">Namespace</label>
+              <input type="text" id="status-ns" value="default">
+            </div>
+            <div>
+              <label for="status-name">Name</label>
+              <input type="text" id="status-name" placeholder="my-service" required>
+            </div>
+          </div>
+          <button type="submit" class="primary" id="statusBtn">Query Status</button>
+        </form>
+        <div id="statusResult"></div>
+      </div>
+    </div>
+
+    <!-- ── DR Replication ── -->
+    <div id="page-dr-replication" class="page">
+      <h2 class="page-title">DR Replication</h2>
+      <p class="page-subtitle">Multi-cloud disaster recovery with OCI GoldenGate CDC replication</p>
+      <div id="dr-replication-content"></div>
+    </div>
+
+    <!-- ── Providers ── -->
+    <div id="page-providers" class="page">
+      <h2 class="page-title">Provider Health</h2>
+      <p class="page-subtitle">Cloud provider health status and circuit breakers</p>
+      <div id="providers-content"></div>
+    </div>
+
+    <!-- ── Experiments ── -->
+    <div id="page-experiments" class="page">
+      <h2 class="page-title">A/B Experiments</h2>
+      <p class="page-subtitle">Active placement scoring experiments</p>
+      <div id="experiments-content"></div>
+    </div>
+
+    <!-- ── Feature Flags ── -->
+    <div id="page-flags" class="page">
+      <h2 class="page-title">Feature Flags</h2>
+      <p class="page-subtitle">Runtime-toggleable placement policies</p>
+      <div id="flags-content"></div>
+    </div>
+
+    <!-- ── Admin: Credentials ── -->
+    <div id="page-admin-credentials" class="page">
+      <h2 class="page-title">Provider Credentials</h2>
+      <p class="page-subtitle">Configure cloud provider authentication. Credentials are required before provisioning.</p>
+      <div id="admin-credentials-content"></div>
+    </div>
+
+    <!-- ── Admin: Cloud Providers ── -->
+    <div id="page-admin-providers" class="page">
+      <h2 class="page-title">Cloud Provider Configuration</h2>
+      <p class="page-subtitle">Configure cloud provider connectivity and credentials</p>
+      <div id="admin-providers-content"></div>
+    </div>
+
+    <!-- ── Admin: Audit Log ── -->
+    <div id="page-admin-audit" class="page">
+      <h2 class="page-title">Audit Log</h2>
+      <p class="page-subtitle">Complete history of all provisioning requests and actions</p>
+      <div id="admin-audit-content"></div>
+    </div>
+
+    <!-- ── Admin: DR Policies ── -->
+    <div id="page-admin-dr" class="page">
+      <h2 class="page-title">DR Policies</h2>
+      <p class="page-subtitle">Disaster recovery strategy per tier</p>
+      <div id="admin-dr-content"></div>
+    </div>
+
+    <!-- ── Admin: Platform Config ── -->
+    <div id="page-admin-config" class="page">
+      <h2 class="page-title">Platform Configuration</h2>
+      <p class="page-subtitle">General settings stored in the internal database</p>
+      <div id="admin-config-content"></div>
+    </div>
+
+    <!-- ── Admin: Saga History ── -->
+    <div id="page-admin-sagas" class="page">
+      <h2 class="page-title">Saga Executions</h2>
+      <p class="page-subtitle">Provisioning workflow history and state machine</p>
+      <div id="admin-sagas-content"></div>
+    </div>
+
+    <!-- ── Admin: Placement History ── -->
+    <div id="page-admin-placements" class="page">
+      <h2 class="page-title">Placement History</h2>
+      <p class="page-subtitle">All placement decisions stored in the database</p>
+      <div id="admin-placements-content"></div>
     </div>
   </div>
 
   <script>
-    const API_BASE = window.location.origin;
+    var API = window.location.origin;
+    var productsCache = [];
+    var selectedProduct = null;
 
-    function renderJSON(containerId, data, isError) {
-      const container = document.getElementById(containerId);
-      const cls = isError ? "status-err" : "status-ok";
-      container.innerHTML =
-        '<pre class="' + cls + '">' + JSON.stringify(data, null, 2) + '</pre>';
-    }
-
-    // Create MySQL Instance
-    document.getElementById("createForm").addEventListener("submit", async function(e) {
-      e.preventDefault();
-      var btn = document.getElementById("createBtn");
-      btn.disabled = true;
-      btn.textContent = "Creating...";
-
-      var payload = {
-        name: document.getElementById("name").value.trim(),
-        namespace: document.getElementById("namespace").value.trim() || "default",
-        cell: document.getElementById("cell").value.trim(),
-        tier: document.getElementById("tier").value,
-        environment: document.getElementById("environment").value,
-        size: document.getElementById("size").value,
-        storageGB: parseInt(document.getElementById("storageGB").value, 10),
-        ha: document.getElementById("ha").checked
-      };
-
-      try {
-        var resp = await fetch(API_BASE + "/api/mysql", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-        var data = await resp.json();
-        renderJSON("createResult", data, !resp.ok);
-      } catch (err) {
-        renderJSON("createResult", { error: err.message }, true);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Create MySQL Instance";
-      }
+    // ═══ NAVIGATION ═══
+    document.querySelectorAll(".nav-item").forEach(function(item) {
+      item.addEventListener("click", function() {
+        var page = this.getAttribute("data-page");
+        navigateTo(page);
+      });
     });
 
-    // Query Status
+    function navigateTo(page) {
+      document.querySelectorAll(".nav-item").forEach(function(n) { n.classList.remove("active"); });
+      document.querySelectorAll(".page").forEach(function(p) { p.classList.remove("active"); });
+      var navItem = document.querySelector('.nav-item[data-page="' + page + '"]');
+      if (navItem) navItem.classList.add("active");
+      var pageEl = document.getElementById("page-" + page);
+      if (pageEl) pageEl.classList.add("active");
+
+      // Load data for pages
+      if (page === "dashboard") loadDashboard();
+      if (page === "catalog") loadCatalog();
+      if (page === "create") loadCreatePage();
+      if (page === "dr-replication") loadDRReplication();
+      if (page === "providers") loadProviders();
+      if (page === "experiments") loadExperiments();
+      if (page === "flags") loadFlags();
+    }
+
+    function renderJSON(containerId, data, isError) {
+      var container = document.getElementById(containerId);
+      var cls = isError ? "status-err" : "status-ok";
+      container.innerHTML = '<pre class="result ' + cls + '">' +
+        JSON.stringify(data, null, 2) + '</pre>';
+    }
+
+    // ═══ FETCH PRODUCTS ═══
+    async function fetchProducts() {
+      if (productsCache.length > 0) return productsCache;
+      try {
+        var resp = await fetch(API + "/api/products");
+        var data = await resp.json();
+        productsCache = data.products || [];
+      } catch(e) { productsCache = []; }
+      return productsCache;
+    }
+
+    // Product icon class
+    function getIconClass(name) {
+      if (name === "mysql" || name === "postgresql") return "db";
+      if (name === "webapp") return "compute";
+      if (name === "redis" || name === "cache") return "cache";
+      if (name === "loadbalancer") return "lb";
+      return "generic";
+    }
+    function getIconChar(name) {
+      if (name === "mysql") return "&#9733;";
+      if (name === "postgresql") return "&#9741;";
+      if (name === "webapp") return "&#9998;";
+      if (name === "redis" || name === "cache") return "&#9830;";
+      return "&#9679;";
+    }
+
+    // Upcoming products (not yet registered, shown as "coming soon")
+    var upcomingProducts = [
+      { name: "redis", display_name: "Managed Redis", description: "High-performance in-memory data store for caching and sessions.", upcoming: true },
+      { name: "loadbalancer", display_name: "Load Balancer", description: "L4/L7 load balancing with TLS termination and health checks.", upcoming: true },
+      { name: "graphdb", display_name: "Graph Database", description: "Graph database for relationship-heavy data models.", upcoming: true },
+      { name: "cache", display_name: "Cache Service", description: "Distributed caching layer with TTL policies and eviction.", upcoming: true },
+      { name: "jsonstore", display_name: "JSON Store", description: "Schema-flexible document storage with indexing and queries.", upcoming: true }
+    ];
+
+    // ═══ CATALOG PAGE ═══
+    async function loadCatalog() {
+      var products = await fetchProducts();
+      var grid = document.getElementById("catalog-grid");
+      grid.innerHTML = "";
+
+      // Registered products
+      products.forEach(function(p) {
+        grid.innerHTML += '<div class="card" onclick="navigateTo(\'create\'); selectProduct(\'' + p.name + '\')">' +
+          '<span class="card-tag available">Available</span>' +
+          '<div class="card-icon ' + getIconClass(p.name) + '">' + getIconChar(p.name) + '</div>' +
+          '<h3>' + p.display_name + '</h3>' +
+          '<p>' + p.description + '</p>' +
+          '</div>';
+      });
+
+      // Upcoming products
+      upcomingProducts.forEach(function(p) {
+        // Don't show if already registered
+        if (products.find(function(rp) { return rp.name === p.name; })) return;
+        grid.innerHTML += '<div class="card" style="opacity:0.6;cursor:default;">' +
+          '<span class="card-tag soon">Coming Soon</span>' +
+          '<div class="card-icon ' + getIconClass(p.name) + '">' + getIconChar(p.name) + '</div>' +
+          '<h3>' + p.display_name + '</h3>' +
+          '<p>' + p.description + '</p>' +
+          '</div>';
+      });
+    }
+
+    // ═══ CREATE PAGE ═══
+    async function loadCreatePage() {
+      var products = await fetchProducts();
+      var grid = document.getElementById("create-select");
+      grid.innerHTML = "";
+      document.getElementById("create-form-wrapper").style.display = "none";
+      document.getElementById("create-select").style.display = "";
+
+      products.forEach(function(p) {
+        grid.innerHTML += '<div class="card" onclick="selectProduct(\'' + p.name + '\')">' +
+          '<div class="card-icon ' + getIconClass(p.name) + '">' + getIconChar(p.name) + '</div>' +
+          '<h3>' + p.display_name + '</h3>' +
+          '<p>' + (p.parameters || []).length + ' configurable parameters</p>' +
+          '</div>';
+      });
+
+      // Populate status product dropdown too
+      var statusSelect = document.getElementById("status-product");
+      statusSelect.innerHTML = "";
+      products.forEach(function(p) {
+        statusSelect.innerHTML += '<option value="' + p.name + '">' + p.display_name + '</option>';
+      });
+    }
+
+    function selectProduct(productName) {
+      var products = productsCache;
+      var product = products.find(function(p) { return p.name === productName; });
+      if (!product) return;
+      selectedProduct = product;
+
+      document.getElementById("create-select").style.display = "none";
+      document.getElementById("create-form-wrapper").style.display = "";
+      document.getElementById("create-form-title").textContent = "Create " + product.display_name;
+      document.getElementById("createResult").innerHTML = "";
+
+      // Build product-specific params
+      var container = document.getElementById("product-params");
+      container.innerHTML = "";
+      var params = product.parameters || [];
+
+      params.forEach(function(param) {
+        if (param.name === "ha") return; // already in common fields
+
+        var html = '<div style="margin-bottom:0;">';
+        html += '<label for="param-' + param.name + '">' + param.name;
+        if (param.required) html += ' <span style="color:#f87171;">*</span>';
+        html += '</label>';
+
+        if (param.type === "choice" && param.choices) {
+          html += '<select id="param-' + param.name + '">';
+          param.choices.forEach(function(c) {
+            var sel = (param.default && c === param.default) ? " selected" : "";
+            html += '<option value="' + c + '"' + sel + '>' + c + '</option>';
+          });
+          html += '</select>';
+        } else if (param.type === "int") {
+          var defVal = param.default !== null && param.default !== undefined ? param.default : "";
+          html += '<input type="number" id="param-' + param.name + '" value="' + defVal + '">';
+        } else if (param.type === "bool") {
+          var checked = param.default ? " checked" : "";
+          html += '<div class="checkbox-row"><input type="checkbox" id="param-' + param.name + '"' + checked + '>';
+          html += '<label for="param-' + param.name + '">' + param.name + '</label></div>';
+        } else {
+          var defStr = param.default || "";
+          html += '<input type="text" id="param-' + param.name + '" value="' + defStr + '"' +
+            (param.required ? ' required' : '') + ' placeholder="' + param.name + '">';
+        }
+        html += '</div>';
+        container.innerHTML += html;
+      });
+    }
+
+    document.getElementById("create-back").addEventListener("click", function() {
+      loadCreatePage();
+    });
+
+    // Create Service Form Submit (handled by multicloud-aware handler below)
+
+    // ═══ STATUS PAGE ═══
     document.getElementById("statusForm").addEventListener("submit", async function(e) {
       e.preventDefault();
       var btn = document.getElementById("statusBtn");
       btn.disabled = true;
       btn.textContent = "Querying...";
 
-      var ns = document.getElementById("statusNs").value.trim() || "default";
-      var name = document.getElementById("statusName").value.trim();
+      var product = document.getElementById("status-product").value;
+      var ns = document.getElementById("status-ns").value.trim() || "default";
+      var name = document.getElementById("status-name").value.trim();
 
       try {
-        var resp = await fetch(API_BASE + "/api/status/mysql/" + ns + "/" + name);
+        var resp = await fetch(API + "/api/services/" + product + "/" + ns + "/" + name);
         var data = await resp.json();
         renderJSON("statusResult", data, !resp.ok);
       } catch (err) {
@@ -211,6 +735,1035 @@
         btn.textContent = "Query Status";
       }
     });
+
+    // ═══ DASHBOARD ═══
+    async function loadDashboard() {
+      // Fetch analytics, health, products, experiments in parallel
+      var results = await Promise.allSettled([
+        fetch(API + "/api/analytics").then(function(r) { return r.json(); }),
+        fetch(API + "/api/providers/health").then(function(r) { return r.json(); }),
+        fetchProducts(),
+        fetch(API + "/api/experiments").then(function(r) { return r.json(); })
+      ]);
+
+      var analytics = results[0].status === "fulfilled" ? results[0].value : {};
+      var health = results[1].status === "fulfilled" ? results[1].value : {};
+      var products = results[2].status === "fulfilled" ? results[2].value : [];
+      var experiments = results[3].status === "fulfilled" ? results[3].value : {};
+
+      // Stats
+      document.getElementById("stat-total").textContent = analytics.total_placements || 0;
+      var rejRate = analytics.gate_rejection_rate;
+      document.getElementById("stat-rejection").textContent =
+        rejRate !== undefined ? (rejRate * 100).toFixed(1) + "%" : "0%";
+      document.getElementById("stat-products").textContent = products.length || 0;
+      document.getElementById("stat-experiments").textContent =
+        (experiments.experiments || []).length;
+
+      // Health grid
+      var healthGrid = document.getElementById("dashboard-health");
+      healthGrid.innerHTML = "";
+      var providers = health.providers || {};
+      var cbs = health.circuit_breakers || {};
+      Object.keys(providers).forEach(function(prov) {
+        var isHealthy = providers[prov];
+        var cb = cbs[prov] || {};
+        healthGrid.innerHTML +=
+          '<div class="health-card">' +
+            '<div class="provider-name">' +
+              '<span class="health-dot ' + (isHealthy ? "healthy" : "unhealthy") + '"></span>' +
+              prov.toUpperCase() +
+            '</div>' +
+            '<div class="cb-state">Circuit: ' + (cb.state || "closed") + '</div>' +
+          '</div>';
+      });
+
+      // Distribution bar
+      var dist = analytics.provider_distribution || {};
+      var bar = document.getElementById("dashboard-bar");
+      var distInfo = document.getElementById("dashboard-distribution");
+      bar.innerHTML = "";
+      distInfo.innerHTML = "";
+
+      var provColors = { aws: "segment-aws", gcp: "segment-gcp", oci: "segment-oci" };
+      var provLabels = { aws: "AWS", gcp: "GCP", oci: "OCI" };
+      var colorHex = { aws: "#f59e0b", gcp: "#3b82f6", oci: "#ef4444" };
+
+      Object.keys(dist).forEach(function(prov) {
+        var pct = dist[prov].percentage || 0;
+        bar.innerHTML += '<div class="' + (provColors[prov] || "") + '" style="width:' + pct + '%;"></div>';
+        distInfo.innerHTML += '<span style="display:inline-block;margin-right:1rem;font-size:0.78rem;">' +
+          '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + (colorHex[prov] || "#94a3b8") + ';margin-right:0.35rem;vertical-align:middle;"></span>' +
+          (provLabels[prov] || prov) + ': ' + (dist[prov].count || 0) + ' (' + pct.toFixed(1) + '%)' +
+          '</span>';
+      });
+
+      if (Object.keys(dist).length === 0) {
+        distInfo.innerHTML = '<span style="font-size:0.78rem;color:#64748b;">No placements yet. Create a service to see distribution.</span>';
+      }
+    }
+
+    // ═══ PROVIDERS PAGE ═══
+    async function loadProviders() {
+      var container = document.getElementById("providers-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+
+      try {
+        var resp = await fetch(API + "/api/providers/health");
+        var data = await resp.json();
+        var providers = data.providers || {};
+        var cbs = data.circuit_breakers || {};
+
+        var html = '<div class="health-grid" style="margin-bottom:1.5rem;">';
+        Object.keys(providers).forEach(function(prov) {
+          var isHealthy = providers[prov];
+          var cb = cbs[prov] || {};
+          html += '<div class="health-card">' +
+            '<div class="provider-name">' +
+              '<span class="health-dot ' + (isHealthy ? "healthy" : "unhealthy") + '"></span>' +
+              prov.toUpperCase() +
+            '</div>' +
+            '<div class="cb-state">Circuit: ' + (cb.state || "closed") +
+              ' | Failures: ' + (cb.failure_count || 0) + '/' + (cb.failure_threshold || 5) +
+            '</div>' +
+            '<div style="margin-top:0.5rem;">' +
+              '<button class="' + (isHealthy ? "secondary" : "primary") + '" ' +
+              'style="font-size:0.7rem;padding:0.3rem 0.75rem;" ' +
+              'onclick="toggleProviderHealth(\'' + prov + '\', ' + !isHealthy + ')">' +
+              (isHealthy ? "Mark Unhealthy" : "Mark Healthy") +
+              '</button>' +
+            '</div>' +
+          '</div>';
+        });
+        html += '</div>';
+
+        html += '<div class="panel"><h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Raw Data</h3>' +
+          '<pre class="result status-ok">' + JSON.stringify(data, null, 2) + '</pre></div>';
+
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function toggleProviderHealth(provider, healthy) {
+      try {
+        await fetch(API + "/api/providers/" + provider + "/health", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ healthy: healthy })
+        });
+        loadProviders();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ EXPERIMENTS PAGE ═══
+    async function loadExperiments() {
+      var container = document.getElementById("experiments-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+
+      try {
+        var resp = await fetch(API + "/api/experiments");
+        var data = await resp.json();
+        var exps = data.experiments || [];
+
+        var html = '';
+        if (exps.length === 0) {
+          html += '<div class="panel"><p style="color:#64748b;">No active experiments. Create one via the API.</p></div>';
+        } else {
+          html += '<table><thead><tr>' +
+            '<th>ID</th><th>Description</th><th>Tier</th><th>Traffic %</th><th>Variant Weights</th><th>Actions</th>' +
+            '</tr></thead><tbody>';
+          exps.forEach(function(exp) {
+            html += '<tr>' +
+              '<td style="font-family:monospace;font-size:0.75rem;">' + exp.id + '</td>' +
+              '<td>' + exp.description + '</td>' +
+              '<td>' + (exp.tier || "*") + '</td>' +
+              '<td>' + ((exp.traffic_percentage || 0) * 100).toFixed(0) + '%</td>' +
+              '<td style="font-family:monospace;font-size:0.7rem;">' + JSON.stringify(exp.variant_weights) + '</td>' +
+              '<td><button class="secondary" style="font-size:0.7rem;padding:0.25rem 0.5rem;" ' +
+              'onclick="deleteExperiment(\'' + exp.id + '\')">Delete</button></td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+
+        // Analytics summary
+        var analyticsResp = await fetch(API + "/api/analytics");
+        var analytics = await analyticsResp.json();
+        html += '<div class="panel" style="margin-top:1rem;">' +
+          '<h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Placement Analytics</h3>' +
+          '<pre class="result status-ok">' + JSON.stringify(analytics, null, 2) + '</pre></div>';
+
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function deleteExperiment(id) {
+      if (!confirm("Delete experiment '" + id + "'?")) return;
+      try {
+        await fetch(API + "/api/experiments/" + id, { method: "DELETE" });
+        loadExperiments();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ FLAGS PAGE ═══
+    async function loadFlags() {
+      var container = document.getElementById("flags-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+
+      try {
+        var resp = await fetch(API + "/api/flags");
+        var data = await resp.json();
+        var flags = data.flags || {};
+
+        var html = '';
+        var flagKeys = Object.keys(flags);
+        if (flagKeys.length === 0) {
+          html += '<div class="panel"><p style="color:#64748b;">No feature flags configured.</p></div>';
+        } else {
+          html += '<table><thead><tr><th>Flag</th><th>Enabled</th><th>Actions</th></tr></thead><tbody>';
+          flagKeys.forEach(function(key) {
+            var enabled = flags[key];
+            html += '<tr>' +
+              '<td style="font-family:monospace;">' + key + '</td>' +
+              '<td><span class="health-dot ' + (enabled ? "healthy" : "unhealthy") + '"></span>' +
+              (enabled ? "Yes" : "No") + '</td>' +
+              '<td>' +
+              '<button class="secondary" style="font-size:0.7rem;padding:0.25rem 0.5rem;margin-right:0.25rem;" ' +
+              'onclick="toggleFlag(\'' + key + '\', ' + !enabled + ')">' + (enabled ? "Disable" : "Enable") + '</button>' +
+              '<button class="secondary" style="font-size:0.7rem;padding:0.25rem 0.5rem;color:#f87171;border-color:#f87171;" ' +
+              'onclick="deleteFlag(\'' + key + '\')">Delete</button>' +
+              '</td></tr>';
+          });
+          html += '</tbody></table>';
+        }
+
+        // Quick add
+        html += '<div class="panel" style="margin-top:1rem;">' +
+          '<h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Set Flag</h3>' +
+          '<div class="row">' +
+            '<div><label>Flag Name</label><input type="text" id="new-flag-name" placeholder="prefer_cost_optimization"></div>' +
+            '<div><label>Enabled</label><select id="new-flag-enabled"><option value="true" selected>true</option><option value="false">false</option></select></div>' +
+            '<div style="display:flex;align-items:flex-end;"><button class="primary" style="margin-bottom:0.85rem;" onclick="addFlag()">Set Flag</button></div>' +
+          '</div>' +
+          '</div>';
+
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function toggleFlag(name, enabled) {
+      try {
+        await fetch(API + "/api/flags/" + name, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: enabled })
+        });
+        loadFlags();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function deleteFlag(name) {
+      if (!confirm("Delete flag '" + name + "'?")) return;
+      try {
+        await fetch(API + "/api/flags/" + name, { method: "DELETE" });
+        loadFlags();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function addFlag() {
+      var name = document.getElementById("new-flag-name").value.trim();
+      if (!name) { alert("Flag name required"); return; }
+      var enabled = document.getElementById("new-flag-enabled").value === "true";
+      try {
+        await fetch(API + "/api/flags/" + name, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: enabled })
+        });
+        loadFlags();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ DR REPLICATION PAGE ═══
+    async function loadDRReplication() {
+      var container = document.getElementById("dr-replication-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var results = await Promise.allSettled([
+          fetch(API + "/api/dr/replication").then(function(r) { return r.json(); }),
+          fetch(API + "/api/dr/strategies").then(function(r) { return r.json(); })
+        ]);
+        var repData = results[0].status === "fulfilled" ? results[0].value : {};
+        var stratData = results[1].status === "fulfilled" ? results[1].value : {};
+        var pairs = repData.replication_pairs || [];
+        var strategies = stratData.strategies || {};
+
+        var html = '';
+
+        // DR Strategy Overview
+        html += '<div class="panel" style="margin-bottom:1.5rem;">' +
+          '<h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">DR Strategy per Tier (OCI GoldenGate)</h3>' +
+          '<table><thead><tr><th>Tier</th><th>Strategy</th><th>GG Required</th><th>Secondary Compute</th><th>Auto-Failover</th><th>Description</th></tr></thead><tbody>';
+        Object.keys(strategies).forEach(function(tier) {
+          var s = strategies[tier];
+          html += '<tr>' +
+            '<td style="font-weight:600;">' + tier + '</td>' +
+            '<td><span style="background:#1e3a5f;color:#38bdf8;padding:0.15rem 0.4rem;border-radius:3px;font-size:0.7rem;">' + s.strategy + '</span></td>' +
+            '<td><span class="health-dot ' + (s.gg_required ? 'healthy' : 'unhealthy') + '"></span>' + (s.gg_required ? 'Yes' : 'No') + '</td>' +
+            '<td>' + s.secondary_compute + '</td>' +
+            '<td><span class="health-dot ' + (s.auto_failover ? 'healthy' : 'unhealthy') + '"></span>' + (s.auto_failover ? 'Yes' : 'No') + '</td>' +
+            '<td style="font-size:0.75rem;color:#94a3b8;">' + s.description + '</td>' +
+            '</tr>';
+        });
+        html += '</tbody></table></div>';
+
+        // Replication Pairs
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">' +
+          '<h3 style="color:#f1f5f9;font-size:0.95rem;">Active Replication Pairs</h3>' +
+          '<button class="secondary" style="font-size:0.75rem;padding:0.3rem 0.75rem;" onclick="loadDRReplication()">Refresh</button></div>';
+
+        if (pairs.length === 0) {
+          html += '<div class="panel"><p style="color:#64748b;">No replication pairs yet. Create a service with tier "low" or "business_critical" to enable DR replication.</p></div>';
+        } else {
+          pairs.forEach(function(p) {
+            var stateColor = p.state === 'REPLICATING' ? '#4ade80' :
+              (p.state === 'FAILED_OVER' ? '#fbbf24' :
+              (p.state === 'LAG_WARNING' ? '#fb923c' :
+              (p.state === 'ERROR' || p.state === 'FAILOVER_IN_PROGRESS' ? '#f87171' : '#94a3b8')));
+
+            html += '<div class="panel" style="margin-bottom:1rem;">' +
+              '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">' +
+              '<div>' +
+                '<h3 style="color:#f1f5f9;font-size:1rem;">' + p.namespace + '/' + p.name +
+                  ' <span style="font-size:0.7rem;color:' + stateColor + ';background:#0f172a;padding:0.2rem 0.5rem;border-radius:4px;">' + p.state + '</span></h3>' +
+                '<span style="font-size:0.75rem;color:#64748b;">Cell: ' + p.cell + ' | Tier: ' + p.tier + ' | Strategy: ' + p.dr_strategy + '</span>' +
+              '</div>' +
+              '<div style="display:flex;gap:0.5rem;">';
+            if (p.state === 'REPLICATING' || p.state === 'LAG_WARNING' || p.state === 'FAILED_OVER') {
+              html += '<button class="primary" style="font-size:0.7rem;padding:0.3rem 0.75rem;background:#dc2626;" ' +
+                'onclick="executeDRFailover(\'' + p.namespace + '\', \'' + p.name + '\')">Failover</button>';
+            }
+            html += '</div></div>';
+
+            // Primary / Secondary visual
+            html += '<div style="display:flex;gap:1rem;margin-bottom:0.75rem;">' +
+              '<div style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:0.75rem;">' +
+                '<div style="font-size:0.7rem;color:#4ade80;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.3rem;">Primary (Writer)</div>' +
+                '<div style="font-size:0.9rem;font-weight:600;color:#f1f5f9;">' + p.primary.provider.toUpperCase() + '</div>' +
+                '<div style="font-size:0.78rem;color:#94a3b8;">' + p.primary.region + '</div>' +
+                '<div style="font-size:0.7rem;color:#64748b;">' + p.primary.cluster + '</div>' +
+              '</div>' +
+              '<div style="display:flex;align-items:center;color:#38bdf8;font-size:1.5rem;">&#8644;</div>' +
+              '<div style="flex:1;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:0.75rem;">' +
+                '<div style="font-size:0.7rem;color:#fbbf24;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:0.3rem;">Secondary (Standby)</div>' +
+                '<div style="font-size:0.9rem;font-weight:600;color:#f1f5f9;">' + p.secondary.provider.toUpperCase() + '</div>' +
+                '<div style="font-size:0.78rem;color:#94a3b8;">' + p.secondary.region + '</div>' +
+                '<div style="font-size:0.7rem;color:#64748b;">' + p.secondary.cluster + '</div>' +
+              '</div>' +
+            '</div>';
+
+            // GoldenGate info + Lag
+            var lagColor = p.lag_within_rpo ? '#4ade80' : '#f87171';
+            var lagText = p.replication_lag_ms > 0 ? (p.replication_lag_ms / 1000).toFixed(1) + 's' : '0s';
+            var rpoText = p.rpo_target_minutes + 'min';
+
+            html += '<div style="display:flex;gap:1rem;">' +
+              '<div style="flex:1;">' +
+                '<table style="font-size:0.78rem;">' +
+                '<tr><td style="color:#64748b;width:130px;">GoldenGate</td><td style="font-family:monospace;">' + p.goldengate.deployment_name + '</td></tr>' +
+                '<tr><td style="color:#64748b;">Replication Lag</td><td style="color:' + lagColor + ';font-weight:600;">' + lagText +
+                  ' <span style="color:#64748b;font-weight:400;">(RPO target: ' + rpoText + ')</span></td></tr>' +
+                '<tr><td style="color:#64748b;">RTO Target</td><td>' + p.rto_target_minutes + ' min</td></tr>' +
+                '<tr><td style="color:#64748b;">Failover Phase</td><td>' + p.failover_phase + '</td></tr>' +
+                '</table>' +
+              '</div>' +
+            '</div>';
+
+            html += '</div>';
+          });
+        }
+
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function executeDRFailover(namespace, name) {
+      if (!confirm("Execute DR failover for '" + namespace + "/" + name + "'?\n\nThis will:\n1. Freeze writes on primary\n2. Verify replication lag\n3. Promote secondary as writer\n4. Update DNS\n5. Scale compute if needed\n\nProceed?")) return;
+      try {
+        var resp = await fetch(API + "/api/dr/replication/" + namespace + "/" + name + "/failover", { method: "POST" });
+        var result = await resp.json();
+        if (resp.ok) {
+          alert("Failover " + result.status + "!\nNew primary: " + result.new_primary.provider + "/" + result.new_primary.region);
+        } else {
+          alert("Failover failed:\n" + JSON.stringify(result.errors || result.error, null, 2));
+        }
+        loadDRReplication();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ MULTICLOUD TOGGLE ═══
+    document.getElementById("svc-multicloud").addEventListener("change", function() {
+      document.getElementById("multicloud-opts").style.display = this.checked ? "" : "none";
+    });
+
+    // Override create form to support multicloud
+    var origSubmit = document.getElementById("createForm").onsubmit;
+    document.getElementById("createForm").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      if (!selectedProduct) return;
+      var isMulticloud = document.getElementById("svc-multicloud").checked;
+
+      var btn = document.getElementById("createBtn");
+      btn.disabled = true;
+      btn.textContent = isMulticloud ? "Deploying Multi-Cloud..." : "Creating...";
+
+      var payload = {
+        name: document.getElementById("svc-name").value.trim(),
+        namespace: document.getElementById("svc-namespace").value.trim() || "default",
+        cell: document.getElementById("svc-cell").value.trim(),
+        tier: document.getElementById("svc-tier").value,
+        environment: document.getElementById("svc-env").value,
+        ha: document.getElementById("svc-ha").checked
+      };
+      (selectedProduct.parameters || []).forEach(function(param) {
+        if (param.name === "ha") return;
+        var el = document.getElementById("param-" + param.name);
+        if (!el) return;
+        if (param.type === "int") {
+          var val = el.value.trim();
+          if (val !== "") payload[param.name] = parseInt(val, 10);
+        } else if (param.type === "bool") {
+          payload[param.name] = el.checked;
+        } else {
+          var sval = el.value.trim();
+          if (sval !== "") payload[param.name] = sval;
+        }
+      });
+
+      var url, method = "POST";
+      if (isMulticloud) {
+        var providers = [];
+        if (document.getElementById("mc-aws").checked) providers.push("aws");
+        if (document.getElementById("mc-gcp").checked) providers.push("gcp");
+        if (document.getElementById("mc-oci").checked) providers.push("oci");
+        payload.target_providers = providers;
+        url = API + "/api/services/" + selectedProduct.name + "/multicloud";
+      } else {
+        url = API + "/api/services/" + selectedProduct.name;
+      }
+
+      try {
+        var resp = await fetch(url, {
+          method: method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        var data = await resp.json();
+        renderJSON("createResult", data, !resp.ok);
+      } catch (err) {
+        renderJSON("createResult", { error: err.message }, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Create";
+      }
+    }, true);
+
+    // ═══ ADMIN: CLOUD PROVIDERS CONFIG ═══
+    async function loadAdminProviders() {
+      var container = document.getElementById("admin-providers-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/providers");
+        var data = await resp.json();
+        var providers = data.providers || [];
+
+        var html = '';
+        providers.forEach(function(p) {
+          html += '<div class="panel">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">' +
+            '<h3 style="color:#f1f5f9;font-size:1rem;">' +
+              '<span class="health-dot ' + (p.enabled ? "healthy" : "unhealthy") + '"></span>' +
+              p.display_name + ' (' + p.name + ')' +
+            '</h3>' +
+            '<button class="secondary" style="font-size:0.7rem;padding:0.25rem 0.5rem;color:#f87171;border-color:#f87171;" ' +
+              'onclick="deleteAdminProvider(\'' + p.name + '\')">Delete</button>' +
+            '</div>' +
+            '<table style="font-size:0.78rem;">' +
+            '<tr><td style="color:#64748b;width:150px;">Credentials Type</td><td>' + p.credentials_type + '</td></tr>' +
+            '<tr><td style="color:#64748b;">Credentials Ref</td><td style="font-family:monospace;">' + (p.credentials_ref || '-') + '</td></tr>' +
+            '<tr><td style="color:#64748b;">Regions</td><td>' + (p.regions.length > 0 ? p.regions.join(', ') : 'All') + '</td></tr>' +
+            '<tr><td style="color:#64748b;">Enabled</td><td>' + (p.enabled ? 'Yes' : 'No') + '</td></tr>' +
+            '</table></div>';
+        });
+
+        // Add provider form
+        html += '<div class="panel">' +
+          '<h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Add / Update Provider</h3>' +
+          '<div class="row">' +
+            '<div><label>Name</label><input type="text" id="ap-name" placeholder="aws"></div>' +
+            '<div><label>Display Name</label><input type="text" id="ap-display" placeholder="Amazon Web Services"></div>' +
+          '</div>' +
+          '<div class="row">' +
+            '<div><label>Credentials Type</label>' +
+              '<select id="ap-cred-type"><option value="secret">secret</option><option value="irsa">irsa</option><option value="workload_identity">workload_identity</option><option value="instance_principal">instance_principal</option></select></div>' +
+            '<div><label>Credentials Ref</label><input type="text" id="ap-cred-ref" placeholder="aws-credentials"></div>' +
+          '</div>' +
+          '<div class="row">' +
+            '<div><label>Regions (comma-separated)</label><input type="text" id="ap-regions" placeholder="us-east-1, eu-west-1"></div>' +
+            '<div><label>Enabled</label><select id="ap-enabled"><option value="true" selected>true</option><option value="false">false</option></select></div>' +
+          '</div>' +
+          '<button class="primary" onclick="saveAdminProvider()">Save Provider</button>' +
+          '</div>';
+
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function saveAdminProvider() {
+      var regions = document.getElementById("ap-regions").value.trim();
+      var body = {
+        name: document.getElementById("ap-name").value.trim(),
+        display_name: document.getElementById("ap-display").value.trim(),
+        credentials_type: document.getElementById("ap-cred-type").value,
+        credentials_ref: document.getElementById("ap-cred-ref").value.trim(),
+        regions: regions ? regions.split(",").map(function(r) { return r.trim(); }) : [],
+        enabled: document.getElementById("ap-enabled").value === "true"
+      };
+      if (!body.name) { alert("Provider name is required"); return; }
+      try {
+        await fetch(API + "/api/admin/providers", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        loadAdminProviders();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function deleteAdminProvider(name) {
+      if (!confirm("Delete provider '" + name + "'?")) return;
+      try {
+        await fetch(API + "/api/admin/providers/" + name, { method: "DELETE" });
+        loadAdminProviders();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ ADMIN: DR POLICIES ═══
+    async function loadAdminDR() {
+      var container = document.getElementById("admin-dr-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/dr-policies");
+        var data = await resp.json();
+        var policies = data.policies || [];
+
+        var html = '';
+        if (policies.length > 0) {
+          html += '<table><thead><tr><th>Tier</th><th>Strategy</th><th>Auto-Failover</th><th>RTO</th><th>RPO</th><th>Actions</th></tr></thead><tbody>';
+          policies.forEach(function(p) {
+            html += '<tr>' +
+              '<td style="font-weight:600;">' + p.tier + '</td>' +
+              '<td>' + p.strategy + '</td>' +
+              '<td><span class="health-dot ' + (p.auto_failover ? "healthy" : "unhealthy") + '"></span>' + (p.auto_failover ? 'Yes' : 'No') + '</td>' +
+              '<td>' + p.rto_target + ' min</td>' +
+              '<td>' + p.rpo_target + ' min</td>' +
+              '<td><button class="secondary" style="font-size:0.7rem;padding:0.25rem 0.5rem;color:#f87171;border-color:#f87171;" ' +
+                'onclick="deleteDRPolicy(\'' + p.tier + '\')">Delete</button></td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+
+        html += '<div class="panel" style="margin-top:1rem;">' +
+          '<h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Add / Update DR Policy</h3>' +
+          '<div class="row">' +
+            '<div><label>Tier</label><select id="dr-tier"><option>low</option><option>medium</option><option>critical</option><option>business_critical</option></select></div>' +
+            '<div><label>Strategy</label><select id="dr-strategy"><option>active_active</option><option>active_passive</option><option>backup_restore</option><option>pilot_light</option></select></div>' +
+          '</div>' +
+          '<div class="row">' +
+            '<div><label>RTO Target (min)</label><input type="number" id="dr-rto" value="60"></div>' +
+            '<div><label>RPO Target (min)</label><input type="number" id="dr-rpo" value="5"></div>' +
+            '<div><label>Auto-Failover</label><select id="dr-auto"><option value="false">No</option><option value="true">Yes</option></select></div>' +
+          '</div>' +
+          '<button class="primary" onclick="saveDRPolicy()">Save Policy</button>' +
+          '</div>';
+
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function saveDRPolicy() {
+      var body = {
+        tier: document.getElementById("dr-tier").value,
+        strategy: document.getElementById("dr-strategy").value,
+        rto_target: parseInt(document.getElementById("dr-rto").value, 10),
+        rpo_target: parseInt(document.getElementById("dr-rpo").value, 10),
+        auto_failover: document.getElementById("dr-auto").value === "true"
+      };
+      try {
+        await fetch(API + "/api/admin/dr-policies", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        loadAdminDR();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function deleteDRPolicy(tier) {
+      if (!confirm("Delete DR policy for '" + tier + "'?")) return;
+      try {
+        await fetch(API + "/api/admin/dr-policies/" + tier, { method: "DELETE" });
+        loadAdminDR();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ ADMIN: PLATFORM CONFIG ═══
+    async function loadAdminConfig() {
+      var container = document.getElementById("admin-config-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/config");
+        var data = await resp.json();
+        var config = data.config || {};
+        var keys = Object.keys(config);
+
+        var html = '';
+        if (keys.length > 0) {
+          html += '<table><thead><tr><th>Key</th><th>Value</th><th>Actions</th></tr></thead><tbody>';
+          keys.forEach(function(key) {
+            html += '<tr>' +
+              '<td style="font-family:monospace;">' + key + '</td>' +
+              '<td style="font-family:monospace;">' + config[key] + '</td>' +
+              '<td><button class="secondary" style="font-size:0.7rem;padding:0.25rem 0.5rem;color:#f87171;border-color:#f87171;" ' +
+                'onclick="deleteConfigKey(\'' + key + '\')">Delete</button></td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        } else {
+          html += '<div class="panel"><p style="color:#64748b;">No config keys set.</p></div>';
+        }
+
+        html += '<div class="panel" style="margin-top:1rem;">' +
+          '<h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Set Config</h3>' +
+          '<div class="row">' +
+            '<div><label>Key</label><input type="text" id="cfg-key" placeholder="saga_enabled"></div>' +
+            '<div><label>Value</label><input type="text" id="cfg-value" placeholder="true"></div>' +
+            '<div style="display:flex;align-items:flex-end;"><button class="primary" style="margin-bottom:0.85rem;" onclick="saveConfig()">Save</button></div>' +
+          '</div>' +
+          '</div>';
+
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function saveConfig() {
+      var key = document.getElementById("cfg-key").value.trim();
+      var value = document.getElementById("cfg-value").value.trim();
+      if (!key) { alert("Key is required"); return; }
+      try {
+        await fetch(API + "/api/admin/config/" + key, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value: value })
+        });
+        loadAdminConfig();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function deleteConfigKey(key) {
+      if (!confirm("Delete config '" + key + "'?")) return;
+      try {
+        await fetch(API + "/api/admin/config/" + key, { method: "DELETE" });
+        loadAdminConfig();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ ADMIN: AUDIT LOG ═══
+    async function loadAdminAudit() {
+      var container = document.getElementById("admin-audit-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/audit-log?limit=100");
+        var data = await resp.json();
+        var entries = data.entries || [];
+
+        var html = '';
+
+        // Filters
+        html += '<div class="panel" style="margin-bottom:1rem;">' +
+          '<div class="row">' +
+            '<div><label>Filter by Action</label><select id="audit-filter-action" onchange="filterAudit()">' +
+            '<option value="">All</option><option value="create_service">create_service</option>' +
+            '<option value="create_mysql">create_mysql</option><option value="failover">failover</option>' +
+            '<option value="multicloud_deploy">multicloud_deploy</option></select></div>' +
+            '<div><label>Filter by Product</label><select id="audit-filter-product" onchange="filterAudit()">' +
+            '<option value="">All</option><option value="mysql">mysql</option>' +
+            '<option value="webapp">webapp</option><option value="postgresql">postgresql</option></select></div>' +
+            '<div style="display:flex;align-items:flex-end;"><button class="secondary" style="margin-bottom:0.85rem;" onclick="loadAdminAudit()">Refresh</button></div>' +
+          '</div></div>';
+
+        if (entries.length === 0) {
+          html += '<div class="panel"><p style="color:#64748b;">No audit log entries yet. Create a service to see activity.</p></div>';
+        } else {
+          html += '<table id="audit-table"><thead><tr>' +
+            '<th>Time</th><th>Action</th><th>Product</th><th>Resource</th>' +
+            '<th>Provider</th><th>Status</th><th>Duration</th><th>Error</th>' +
+            '</tr></thead><tbody>';
+          entries.forEach(function(e) {
+            var ts = new Date(e.timestamp * 1000);
+            var timeStr = ts.toLocaleString();
+            var isErr = e.response_status >= 400 || e.error;
+            var statusCls = isErr ? 'unhealthy' : 'healthy';
+            var durationStr = e.duration_ms ? e.duration_ms.toFixed(0) + 'ms' : '-';
+            var resource = e.namespace && e.name ? e.namespace + '/' + e.name : '-';
+            html += '<tr data-action="' + (e.action || '') + '" data-product="' + (e.product || '') + '">' +
+              '<td style="font-size:0.72rem;white-space:nowrap;">' + timeStr + '</td>' +
+              '<td><span style="background:#1e3a5f;color:#38bdf8;padding:0.15rem 0.4rem;border-radius:3px;font-size:0.7rem;">' + e.action + '</span></td>' +
+              '<td>' + (e.product || '-') + '</td>' +
+              '<td style="font-family:monospace;font-size:0.72rem;">' + resource + '</td>' +
+              '<td>' + (e.provider ? e.provider.toUpperCase() : '-') + '</td>' +
+              '<td><span class="health-dot ' + statusCls + '"></span>' + e.response_status + '</td>' +
+              '<td>' + durationStr + '</td>' +
+              '<td style="font-size:0.7rem;color:#f87171;max-width:250px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' +
+                (e.error || '').replace(/"/g, '&quot;') + '">' + (e.error || '-') + '</td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    function filterAudit() {
+      var action = document.getElementById("audit-filter-action").value;
+      var product = document.getElementById("audit-filter-product").value;
+      var rows = document.querySelectorAll("#audit-table tbody tr");
+      rows.forEach(function(row) {
+        var matchAction = !action || row.getAttribute("data-action") === action;
+        var matchProduct = !product || row.getAttribute("data-product") === product;
+        row.style.display = (matchAction && matchProduct) ? "" : "none";
+      });
+    }
+
+    // ═══ ADMIN: CREDENTIALS ═══
+    async function loadAdminCredentials() {
+      var container = document.getElementById("admin-credentials-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/credentials");
+        var data = await resp.json();
+        var creds = data.credentials || [];
+
+        // Also fetch provider configs to show all providers
+        var provResp = await fetch(API + "/api/admin/providers");
+        var provData = await provResp.json();
+        var providers = provData.providers || [];
+
+        var html = '';
+
+        // Status overview
+        html += '<div class="stats-grid" style="margin-bottom:1.5rem;">';
+        providers.forEach(function(p) {
+          var cred = creds.find(function(c) { return c.provider === p.name; });
+          var hasCred = cred && cred.has_credentials;
+          var validated = cred && cred.validated;
+          var statusText = !hasCred ? 'NOT CONFIGURED' : (validated ? 'VALIDATED' : 'NOT VALIDATED');
+          var statusColor = !hasCred ? '#f87171' : (validated ? '#4ade80' : '#fbbf24');
+          html += '<div class="stat-card">' +
+            '<div class="stat-label">' + p.display_name + '</div>' +
+            '<div class="stat-value" style="font-size:1rem;color:' + statusColor + ';">' + statusText + '</div>' +
+            '<div class="stat-sub">' + (cred ? cred.cred_type : 'none') + '</div>' +
+            '</div>';
+        });
+        html += '</div>';
+
+        // Credential details per provider
+        providers.forEach(function(p) {
+          var cred = creds.find(function(c) { return c.provider === p.name; });
+          var hasCred = cred && cred.has_credentials;
+          var validated = cred && cred.validated;
+          var statusDot = !hasCred ? 'unhealthy' : (validated ? 'healthy' : '');
+
+          html += '<div class="panel">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;">' +
+            '<h3 style="color:#f1f5f9;font-size:1rem;">' +
+              '<span class="health-dot ' + statusDot + '"' + (!hasCred || validated ? '' : ' style="background:#fbbf24;"') + '></span>' +
+              p.display_name + ' (' + p.name + ')' +
+            '</h3>' +
+            '<div style="display:flex;gap:0.5rem;">';
+          if (hasCred) {
+            html += '<button class="primary" style="font-size:0.7rem;padding:0.3rem 0.75rem;" ' +
+              'onclick="validateCred(\'' + p.name + '\')">Validate</button>';
+            html += '<button class="secondary" style="font-size:0.7rem;padding:0.3rem 0.75rem;" ' +
+              'onclick="viewCredMasked(\'' + p.name + '\')">View (masked)</button>';
+            html += '<button class="secondary" style="font-size:0.7rem;padding:0.3rem 0.75rem;color:#f87171;border-color:#f87171;" ' +
+              'onclick="deleteCred(\'' + p.name + '\')">Delete</button>';
+          }
+          html += '</div></div>';
+
+          if (hasCred) {
+            html += '<table style="font-size:0.78rem;">' +
+              '<tr><td style="color:#64748b;width:150px;">Type</td><td>' + cred.cred_type + '</td></tr>' +
+              '<tr><td style="color:#64748b;">Validated</td><td>' + (validated ? 'Yes' : 'No') + '</td></tr>' +
+              '<tr><td style="color:#64748b;">Updated</td><td>' + new Date((cred.updated_at || 0) * 1000).toLocaleString() + '</td></tr>' +
+              '</table>';
+          } else {
+            html += '<p style="font-size:0.8rem;color:#f87171;margin-bottom:0.5rem;">No credentials configured. Provisioning to this provider will be blocked.</p>';
+          }
+
+          // Inline credential form
+          html += '<div id="cred-masked-' + p.name + '" style="margin-top:0.5rem;"></div>';
+          html += '<details style="margin-top:0.75rem;"><summary style="cursor:pointer;color:#38bdf8;font-size:0.8rem;">Set Credentials</summary>';
+          html += '<div style="margin-top:0.75rem;">';
+          html += buildCredForm(p.name);
+          html += '</div></details>';
+          html += '</div>';
+        });
+
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    function buildCredForm(provider) {
+      var html = '';
+      if (provider === 'aws') {
+        html += '<label>Credential Type</label>' +
+          '<select id="cred-type-' + provider + '">' +
+          '<option value="access_key">Access Key</option>' +
+          '<option value="irsa">IRSA (no secret needed)</option></select>';
+        html += '<div id="cred-fields-' + provider + '">' +
+          '<label>AWS Access Key ID</label>' +
+          '<input type="text" id="cred-aws-key-' + provider + '" placeholder="AKIAIOSFODNN7EXAMPLE">' +
+          '<label>AWS Secret Access Key</label>' +
+          '<input type="password" id="cred-aws-secret-' + provider + '" placeholder="wJalrXUtnFEMI/K7MDENG/...">' +
+          '<label>Region (optional)</label>' +
+          '<input type="text" id="cred-aws-region-' + provider + '" placeholder="us-east-1">' +
+          '</div>';
+      } else if (provider === 'gcp') {
+        html += '<label>Credential Type</label>' +
+          '<select id="cred-type-' + provider + '">' +
+          '<option value="service_account">Service Account JSON</option>' +
+          '<option value="workload_identity">Workload Identity (no secret needed)</option></select>';
+        html += '<div id="cred-fields-' + provider + '">' +
+          '<label>Project ID</label>' +
+          '<input type="text" id="cred-gcp-project-' + provider + '" placeholder="my-project-123">' +
+          '<label>Client Email</label>' +
+          '<input type="text" id="cred-gcp-email-' + provider + '" placeholder="sa@project.iam.gserviceaccount.com">' +
+          '<label>Private Key</label>' +
+          '<textarea id="cred-gcp-key-' + provider + '" rows="3" style="width:100%;background:#0f172a;border:1px solid #475569;border-radius:4px;color:#e2e8f0;font-size:0.8rem;padding:0.5rem;margin-bottom:0.85rem;font-family:monospace;" placeholder="-----BEGIN PRIVATE KEY-----..."></textarea>' +
+          '</div>';
+      } else if (provider === 'oci') {
+        html += '<label>Credential Type</label>' +
+          '<select id="cred-type-' + provider + '">' +
+          '<option value="api_key">API Key</option>' +
+          '<option value="instance_principal">Instance Principal (no secret needed)</option></select>';
+        html += '<div id="cred-fields-' + provider + '">' +
+          '<label>Tenancy OCID</label>' +
+          '<input type="text" id="cred-oci-tenancy-' + provider + '" placeholder="ocid1.tenancy.oc1..">' +
+          '<label>User OCID</label>' +
+          '<input type="text" id="cred-oci-user-' + provider + '" placeholder="ocid1.user.oc1..">' +
+          '<label>Fingerprint</label>' +
+          '<input type="text" id="cred-oci-fingerprint-' + provider + '" placeholder="aa:bb:cc:...">' +
+          '<label>Private Key</label>' +
+          '<textarea id="cred-oci-key-' + provider + '" rows="3" style="width:100%;background:#0f172a;border:1px solid #475569;border-radius:4px;color:#e2e8f0;font-size:0.8rem;padding:0.5rem;margin-bottom:0.85rem;font-family:monospace;" placeholder="-----BEGIN RSA PRIVATE KEY-----..."></textarea>' +
+          '</div>';
+      } else {
+        html += '<label>Credential Type</label>' +
+          '<input type="text" id="cred-type-' + provider + '" placeholder="access_key">' +
+          '<label>Credentials JSON</label>' +
+          '<textarea id="cred-generic-' + provider + '" rows="4" style="width:100%;background:#0f172a;border:1px solid #475569;border-radius:4px;color:#e2e8f0;font-size:0.8rem;padding:0.5rem;margin-bottom:0.85rem;font-family:monospace;" placeholder=\'{"key": "value"}\'></textarea>';
+      }
+      html += '<button class="primary" style="font-size:0.8rem;" onclick="saveCred(\'' + provider + '\')">Save Credentials</button>';
+      return html;
+    }
+
+    async function saveCred(provider) {
+      var credType = document.getElementById("cred-type-" + provider).value;
+      var credData = {};
+
+      if (provider === 'aws' && credType === 'access_key') {
+        credData.aws_access_key_id = (document.getElementById("cred-aws-key-" + provider) || {}).value || '';
+        credData.aws_secret_access_key = (document.getElementById("cred-aws-secret-" + provider) || {}).value || '';
+        var awsRegion = (document.getElementById("cred-aws-region-" + provider) || {}).value || '';
+        if (awsRegion) credData.region = awsRegion;
+      } else if (provider === 'gcp' && credType === 'service_account') {
+        credData.project_id = (document.getElementById("cred-gcp-project-" + provider) || {}).value || '';
+        credData.client_email = (document.getElementById("cred-gcp-email-" + provider) || {}).value || '';
+        credData.private_key = (document.getElementById("cred-gcp-key-" + provider) || {}).value || '';
+      } else if (provider === 'oci' && credType === 'api_key') {
+        credData.tenancy_ocid = (document.getElementById("cred-oci-tenancy-" + provider) || {}).value || '';
+        credData.user_ocid = (document.getElementById("cred-oci-user-" + provider) || {}).value || '';
+        credData.fingerprint = (document.getElementById("cred-oci-fingerprint-" + provider) || {}).value || '';
+        credData.private_key = (document.getElementById("cred-oci-key-" + provider) || {}).value || '';
+      } else if (credType === 'irsa' || credType === 'workload_identity' || credType === 'instance_principal') {
+        credData.method = credType;
+        credData.configured = true;
+      } else {
+        try {
+          credData = JSON.parse((document.getElementById("cred-generic-" + provider) || {}).value || '{}');
+        } catch(e) { alert("Invalid JSON"); return; }
+      }
+
+      try {
+        var resp = await fetch(API + "/api/admin/credentials", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: provider, cred_type: credType, cred_data: credData })
+        });
+        var result = await resp.json();
+        if (resp.ok) {
+          alert("Credentials saved for " + provider + ". Please validate.");
+          loadAdminCredentials();
+        } else {
+          alert("Error: " + (result.error || "Unknown error"));
+        }
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function validateCred(provider) {
+      try {
+        var resp = await fetch(API + "/api/admin/credentials/" + provider + "/validate", { method: "POST" });
+        var result = await resp.json();
+        if (result.valid) {
+          alert("Credentials for " + provider + " are valid!");
+        } else {
+          alert("Validation failed:\n" + (result.errors || []).join("\n"));
+        }
+        loadAdminCredentials();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function viewCredMasked(provider) {
+      try {
+        var resp = await fetch(API + "/api/admin/credentials/" + provider);
+        var data = await resp.json();
+        var el = document.getElementById("cred-masked-" + provider);
+        el.innerHTML = '<pre class="result status-ok">' + JSON.stringify(data.credentials, null, 2) + '</pre>';
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    async function deleteCred(provider) {
+      if (!confirm("Delete credentials for '" + provider + "'? Provisioning to this provider will be blocked.")) return;
+      try {
+        await fetch(API + "/api/admin/credentials/" + provider, { method: "DELETE" });
+        loadAdminCredentials();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ ADMIN: SAGA HISTORY ═══
+    async function loadAdminSagas() {
+      var container = document.getElementById("admin-sagas-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/sagas?limit=30");
+        var data = await resp.json();
+        var sagas = data.sagas || [];
+
+        var html = '';
+        if (sagas.length === 0) {
+          html += '<div class="panel"><p style="color:#64748b;">No saga executions yet. Create a service to trigger a saga.</p></div>';
+        } else {
+          html += '<table><thead><tr><th>ID</th><th>Product</th><th>Name</th><th>State</th><th>Step</th><th>Steps Done</th><th>Error</th><th>Actions</th></tr></thead><tbody>';
+          sagas.forEach(function(s) {
+            var stateColor = s.state === 'COMPLETED' ? 'healthy' : (s.state === 'FAILED' || s.state === 'ROLLED_BACK' ? 'unhealthy' : '');
+            html += '<tr>' +
+              '<td>' + s.id + '</td>' +
+              '<td>' + s.product + '</td>' +
+              '<td style="font-family:monospace;font-size:0.75rem;">' + s.namespace + '/' + s.name + '</td>' +
+              '<td><span class="health-dot ' + stateColor + '"></span>' + s.state + '</td>' +
+              '<td>' + s.current_step + '</td>' +
+              '<td style="font-size:0.7rem;">' + s.steps_completed.join(', ') + '</td>' +
+              '<td style="font-size:0.7rem;color:#f87171;max-width:200px;overflow:hidden;text-overflow:ellipsis;">' + (s.error || '-') + '</td>' +
+              '<td>' + (s.state === 'FAILED' || s.state === 'ROLLED_BACK' ?
+                '<button class="primary" style="font-size:0.7rem;padding:0.25rem 0.5rem;" onclick="retrySaga(' + s.id + ')">Retry</button>' : '-') +
+              '</td></tr>';
+          });
+          html += '</tbody></table>';
+        }
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    async function retrySaga(id) {
+      try {
+        await fetch(API + "/api/admin/sagas/" + id + "/retry", { method: "POST" });
+        loadAdminSagas();
+      } catch(e) { alert("Error: " + e.message); }
+    }
+
+    // ═══ ADMIN: PLACEMENT HISTORY ═══
+    async function loadAdminPlacements() {
+      var container = document.getElementById("admin-placements-content");
+      container.innerHTML = '<p style="color:#64748b;">Loading...</p>';
+      try {
+        var resp = await fetch(API + "/api/admin/placements?limit=30");
+        var data = await resp.json();
+        var placements = data.placements || [];
+
+        var html = '';
+        if (placements.length === 0) {
+          html += '<div class="panel"><p style="color:#64748b;">No placement records yet.</p></div>';
+        } else {
+          html += '<table><thead><tr><th>ID</th><th>Product</th><th>Name</th><th>Provider</th><th>Region</th><th>Tier</th><th>HA</th><th>Status</th><th>Score</th></tr></thead><tbody>';
+          placements.forEach(function(p) {
+            var stateColor = p.status === 'READY' ? 'healthy' : (p.status === 'FAILED' ? 'unhealthy' : '');
+            html += '<tr>' +
+              '<td>' + p.id + '</td>' +
+              '<td>' + p.product + '</td>' +
+              '<td style="font-family:monospace;font-size:0.75rem;">' + p.namespace + '/' + p.name + '</td>' +
+              '<td>' + p.provider.toUpperCase() + '</td>' +
+              '<td>' + p.region + '</td>' +
+              '<td>' + p.tier + '</td>' +
+              '<td>' + (p.ha ? 'Yes' : 'No') + '</td>' +
+              '<td><span class="health-dot ' + stateColor + '"></span>' + p.status + '</td>' +
+              '<td>' + p.total_score.toFixed(4) + '</td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+        container.innerHTML = html;
+      } catch(err) {
+        container.innerHTML = '<p style="color:#f87171;">Error: ' + err.message + '</p>';
+      }
+    }
+
+    // ═══ EXTENDED NAVIGATION ═══
+    function navigateToExtended(page) {
+      if (page === "admin-credentials") loadAdminCredentials();
+      if (page === "admin-providers") loadAdminProviders();
+      if (page === "admin-dr") loadAdminDR();
+      if (page === "admin-config") loadAdminConfig();
+      if (page === "admin-audit") loadAdminAudit();
+      if (page === "admin-sagas") loadAdminSagas();
+      if (page === "admin-placements") loadAdminPlacements();
+    }
+
+    // Patch navigateTo to handle admin pages
+    var _origNavigateTo = navigateTo;
+    navigateTo = function(page) {
+      _origNavigateTo(page);
+      navigateToExtended(page);
+    };
+
+    // ═══ INIT ═══
+    loadDashboard();
   </script>
 </body>
 </html>
