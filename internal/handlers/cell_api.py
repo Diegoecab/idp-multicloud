@@ -1,6 +1,5 @@
-import os
 import time
-from flask import Blueprint, jsonify, request, send_from_directory
+from flask import Blueprint, jsonify, request
 
 from internal.policy.data import policy_store
 from internal.scheduler.placement_engine import schedule
@@ -16,18 +15,12 @@ def _claim_name(prefix: str, cell: str, env: str):
     return f"{prefix}-{cell}-{env}".replace("_", "-")
 
 
-@cell_bp.get("/health")
+@cell_bp.get("/api/cell/health")
 def health():
     return jsonify({"status": "ok"})
 
 
-@cell_bp.get("/")
-def root():
-    web_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "web"))
-    return send_from_directory(web_dir, "index.html")
-
-
-@cell_bp.post("/api/mysql")
+@cell_bp.post("/api/cell/mysql")
 def create_mysql():
     body = request.get_json(force=True)
     cell = body["cell"]
@@ -86,7 +79,7 @@ def create_mysql():
     return jsonify(record), 201
 
 
-@cell_bp.post("/api/app")
+@cell_bp.post("/api/cell/app")
 def create_app():
     body = request.get_json(force=True)
     cell, env, tier = body["cell"], body["environment"], body["tier"]
@@ -121,7 +114,7 @@ def create_app():
     return jsonify(result), 201
 
 
-@cell_bp.get("/api/status/<cell>/<env>")
+@cell_bp.get("/api/cell/status/<cell>/<env>")
 def status(cell, env):
     key = f"{cell}:{env}"
     app = _STATE["apps"].get(key, {})
@@ -140,7 +133,7 @@ def status(cell, env):
     })
 
 
-@cell_bp.post("/api/failover")
+@cell_bp.post("/api/cell/failover")
 def run_failover():
     body = request.get_json(force=True)
     cell, env = body["cell"], body["environment"]
