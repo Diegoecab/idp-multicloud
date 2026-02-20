@@ -1,0 +1,40 @@
+# Placeholder manifests to adapt with exact provider API versions.
+apiVersion: oci.platform.example.org/v1alpha1
+kind: GoldenGateDeployment
+metadata:
+  name: gg-payments-prod
+spec:
+  edition: ENTERPRISE
+  subnetRef: oci-private-subnet
+---
+apiVersion: oci.platform.example.org/v1alpha1
+kind: GoldenGateConnection
+metadata:
+  name: gg-src-payments-prod
+spec:
+  type: MYSQL
+  secretRef: mysql-primary-payments-prod-conn
+---
+apiVersion: oci.platform.example.org/v1alpha1
+kind: GoldenGateConnection
+metadata:
+  name: gg-tgt-payments-prod
+spec:
+  type: MYSQL
+  secretRef: mysql-secondary-payments-prod-conn
+---
+apiVersion: oci.platform.example.org/v1alpha1
+kind: GoldenGateExtract
+metadata:
+  name: gg-extract-payments-prod
+spec:
+  sourceConnectionRef: gg-src-payments-prod
+  begin: now
+---
+apiVersion: oci.platform.example.org/v1alpha1
+kind: GoldenGateReplicat
+metadata:
+  name: gg-replicat-payments-prod
+spec:
+  targetConnectionRef: gg-tgt-payments-prod
+  applyMode: integrated

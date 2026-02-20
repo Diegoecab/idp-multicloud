@@ -27,6 +27,7 @@ from flask import Flask, send_from_directory
 from internal.handlers.mysql import mysql_bp
 from internal.handlers.services import services_bp
 from internal.handlers.admin import admin_bp
+from internal.handlers.cell_api import cell_bp
 from internal.k8s.client import init_client
 from internal.db.database import init_db, seed_defaults
 import internal.products.catalog  # noqa: F401 — registers MySQL and WebApp products
@@ -46,6 +47,7 @@ def create_app() -> Flask:
     app.register_blueprint(mysql_bp)
     app.register_blueprint(services_bp)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(cell_bp)
 
     # Serve the frontend
     web_dir = os.path.join(PROJECT_ROOT, "web")

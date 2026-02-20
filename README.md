@@ -1752,3 +1752,56 @@ kubectl get mysqlinstanceclaim test-db \
 - Multi-cluster federation for global placement.
 - Cost estimation and chargeback integration.
 - GitOps workflow integration (ArgoCD, Flux).
+
+---
+
+## Additive extensions: Cell-based Full Stack DR (non-breaking)
+
+The original platform behavior and APIs remain intact. In addition, this repository now includes **cell-scoped DR workflows** under a dedicated namespace so legacy flows are not broken.
+
+### New additive API namespace
+
+- `GET /api/cell/health`
+- `POST /api/cell/mysql`
+- `POST /api/cell/app`
+- `GET /api/cell/status/<cell>/<env>`
+- `POST /api/cell/failover`
+
+These endpoints are implemented in `internal/handlers/cell_api.py` and coexist with legacy `mysql/services/admin` APIs.
+
+### Policy-as-data for cell DR
+
+- `config/policy.yaml` contains:
+  - cell candidates
+  - provider capabilities
+  - tier gates/weights (`C0/C1/C2`)
+  - DR profiles (`gold/silver/bronze`)
+  - default traffic provider selection
+- Loader: `internal/policy/data.py`
+- Scheduler: `internal/scheduler/placement_engine.py` (sticky selection + primary/secondary plan)
+
+### Traffic provider pluggability
+
+- Interface: `internal/traffic/base.py`
+- Factory: `internal/traffic/factory.py`
+- Providers:
+  - OCI DNS (default): `internal/traffic/providers/oci_dns.py`
+  - Cloudflare stub: `internal/traffic/providers/cloudflare.py`
+  - Route53 stub: `internal/traffic/providers/route53.py`
+
+### DR orchestration
+
+- Minimal orchestrator: `internal/dr/orchestrator.py`
+- Includes lag guardrail against expected RPO and controlled traffic switch during failover.
+
+### Kubernetes templates/manifests (additive)
+
+- Internal DR CRDs: `manifests/crds/platform-dr-crds.yaml`
+- Argo CD templates: `manifests/argocd/cell-applications-template.yaml`
+- OCI GoldenGate placeholders: `manifests/oci-goldengate/replication-template.yaml`
+
+### Architecture diagrams (additive)
+
+- Normal operation: `diagrams/normal-operation.mmd`
+- Failover flow: `diagrams/failover-flow.mmd`
+

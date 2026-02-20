@@ -257,6 +257,10 @@
         <span class="nav-icon">&#9873;</span>
         <span>Feature Flags</span>
       </div>
+      <div class="nav-item" data-page="cell-dr">
+        <span class="nav-icon">&#9888;</span>
+        <span>Cell DR</span>
+      </div>
     </div>
 
     <div class="nav-section">
@@ -530,6 +534,63 @@
       <p class="page-subtitle">All placement decisions stored in the database</p>
       <div id="admin-placements-content"></div>
     </div>
+    <!-- ── Cell DR (new) ── -->
+    <div id="page-cell-dr" class="page">
+      <h2 class="page-title">Cell DR Workflows</h2>
+      <p class="page-subtitle">Nuevos flujos cell-based sin quitar las opciones de Admin existentes.</p>
+
+      <div class="panel">
+        <h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Create Cell MySQL</h3>
+        <form id="cellMysqlForm">
+          <div class="row">
+            <div><label>Cell</label><input id="cell-mysql-cell" value="payments"></div>
+            <div><label>Environment</label><select id="cell-mysql-env"><option>dev</option><option>stg</option><option selected>prod</option></select></div>
+            <div><label>Tier</label><select id="cell-mysql-tier"><option>C0</option><option>C1</option><option selected>C2</option></select></div>
+          </div>
+          <div class="row">
+            <div><label>DR Profile</label><select id="cell-mysql-dr"><option>gold</option><option>silver</option><option selected>bronze</option></select></div>
+            <div><label>Size</label><input id="cell-mysql-size" value="small"></div>
+            <div><label>Storage GB</label><input id="cell-mysql-storage" type="number" value="50"></div>
+          </div>
+          <div class="checkbox-row"><input type="checkbox" id="cell-mysql-ha"><label for="cell-mysql-ha">HA</label></div>
+          <button class="primary" type="submit">Create Cell MySQL</button>
+        </form>
+      </div>
+
+      <div class="panel">
+        <h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Create Cell App</h3>
+        <form id="cellAppForm">
+          <div class="row">
+            <div><label>Cell</label><input id="cell-app-cell" value="payments"></div>
+            <div><label>Environment</label><select id="cell-app-env"><option>dev</option><option>stg</option><option selected>prod</option></select></div>
+            <div><label>Tier</label><select id="cell-app-tier"><option selected>C0</option><option>C1</option><option>C2</option></select></div>
+          </div>
+          <div class="row">
+            <div><label>DR Profile</label><select id="cell-app-dr"><option selected>gold</option><option>silver</option><option>bronze</option></select></div>
+            <div><label>Image</label><input id="cell-app-image" value="ghcr.io/acme/payments:1.0.0"></div>
+            <div><label>Public Host</label><input id="cell-app-host" value="payments.prod.company.com"></div>
+          </div>
+          <button class="primary" type="submit">Create Cell App</button>
+        </form>
+      </div>
+
+      <div class="panel">
+        <h3 style="color:#f1f5f9;margin-bottom:0.75rem;font-size:0.95rem;">Status / Failover</h3>
+        <form id="cellStatusForm" class="inline-form">
+          <div><label>Cell</label><input id="cell-status-cell" value="payments"></div>
+          <div><label>Env</label><select id="cell-status-env"><option>dev</option><option>stg</option><option selected>prod</option></select></div>
+          <button class="secondary" type="submit">Query Cell Status</button>
+        </form>
+        <form id="cellFailoverForm" class="inline-form">
+          <div><label>Cell</label><input id="cell-fail-cell" value="payments"></div>
+          <div><label>Env</label><select id="cell-fail-env"><option>dev</option><option>stg</option><option selected>prod</option></select></div>
+          <div><label>Host</label><input id="cell-fail-host" value="payments.prod.company.com"></div>
+          <button class="primary" type="submit">Execute Cell Failover</button>
+        </form>
+      </div>
+
+      <div id="cellDrResult"></div>
+    </div>
   </div>
 
   <script>
@@ -561,6 +622,7 @@
       if (page === "providers") loadProviders();
       if (page === "experiments") loadExperiments();
       if (page === "flags") loadFlags();
+      if (page === "cell-dr") initCellDRPage();
     }
 
     function renderJSON(containerId, data, isError) {
@@ -1764,6 +1826,83 @@
 
     // ═══ INIT ═══
     loadDashboard();
+  
+    // ═══ CELL DR PAGE (new) ═══
+    function initCellDRPage() {
+      // no-op: forms below are event-driven and keep last values
+    }
+
+    document.getElementById("cellMysqlForm").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      try {
+        var resp = await fetch(API + "/api/cell/mysql", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cell: document.getElementById("cell-mysql-cell").value.trim(),
+            environment: document.getElementById("cell-mysql-env").value,
+            tier: document.getElementById("cell-mysql-tier").value,
+            drProfile: document.getElementById("cell-mysql-dr").value,
+            size: document.getElementById("cell-mysql-size").value.trim(),
+            storageGB: parseInt(document.getElementById("cell-mysql-storage").value, 10),
+            ha: document.getElementById("cell-mysql-ha").checked
+          })
+        });
+        renderJSON("cellDrResult", await resp.json(), !resp.ok);
+      } catch (err) {
+        renderJSON("cellDrResult", { error: err.message }, true);
+      }
+    });
+
+    document.getElementById("cellAppForm").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      try {
+        var resp = await fetch(API + "/api/cell/app", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cell: document.getElementById("cell-app-cell").value.trim(),
+            environment: document.getElementById("cell-app-env").value,
+            tier: document.getElementById("cell-app-tier").value,
+            drProfile: document.getElementById("cell-app-dr").value,
+            app: { image: document.getElementById("cell-app-image").value.trim() },
+            traffic: { publicHost: document.getElementById("cell-app-host").value.trim(), mode: "active-passive" }
+          })
+        });
+        renderJSON("cellDrResult", await resp.json(), !resp.ok);
+      } catch (err) {
+        renderJSON("cellDrResult", { error: err.message }, true);
+      }
+    });
+
+    document.getElementById("cellStatusForm").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      try {
+        var cell = document.getElementById("cell-status-cell").value.trim();
+        var env = document.getElementById("cell-status-env").value;
+        var resp = await fetch(API + "/api/cell/status/" + cell + "/" + env);
+        renderJSON("cellDrResult", await resp.json(), !resp.ok);
+      } catch (err) {
+        renderJSON("cellDrResult", { error: err.message }, true);
+      }
+    });
+
+    document.getElementById("cellFailoverForm").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      if (!confirm("Confirm controlled cell failover?")) return;
+      try {
+        var resp = await fetch(API + "/api/cell/failover", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cell: document.getElementById("cell-fail-cell").value.trim(),
+            environment: document.getElementById("cell-fail-env").value,
+            host: document.getElementById("cell-fail-host").value.trim()
+          })
+        });
+        renderJSON("cellDrResult", await resp.json(), !resp.ok);
+      } catch (err) {
+        renderJSON("cellDrResult", { error: err.message }, true);
+      }
+    });
+
   </script>
 </body>
 </html>
