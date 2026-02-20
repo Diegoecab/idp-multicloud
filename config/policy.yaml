@@ -1,0 +1,95 @@
+traffic:
+  defaultProvider: oci-dns
+  providers:
+    oci-dns:
+      zone: company.com
+      compartmentOcid: ocid1.compartment.oc1..replace
+    cloudflare:
+      zoneId: replace
+    route53:
+      hostedZoneId: replace
+
+cells:
+  payments:
+    candidates:
+      - provider: aws
+        region: us-east-1
+        runtimeClusterRef: eks-prod-use1
+        networkProfile:
+          privateSubnets: [subnet-a, subnet-b]
+      - provider: gcp
+        region: us-central1
+        runtimeClusterRef: gke-prod-usc1
+        networkProfile:
+          privateSubnets: [subnet-a, subnet-b]
+      - provider: oci
+        region: us-ashburn-1
+        runtimeClusterRef: oke-prod-iad
+        networkProfile:
+          privateSubnets: [subnet-a, subnet-b]
+
+capabilities:
+  aws:
+    mysql: { pitr: true, multiAz: true, private: true }
+    maturity: 0.95
+    cost: 0.55
+  gcp:
+    mysql: { pitr: true, multiAz: true, private: true }
+    maturity: 0.9
+    cost: 0.65
+  oci:
+    mysql: { pitr: true, multiAz: false, private: true }
+    maturity: 0.85
+    cost: 0.8
+
+tiers:
+  C0:
+    defaults:
+      drProfile: gold
+      pitr: true
+      private: true
+      ha: true
+    gates:
+      crossCloudSecondary: true
+      requiredMysql: [pitr, private, multiAz]
+    weights: { latency: 0.3, dr: 0.4, maturity: 0.2, cost: 0.1 }
+  C1:
+    defaults:
+      drProfile: silver
+      pitr: true
+      private: true
+      ha: true
+    gates:
+      crossCloudSecondary: true
+      requiredMysql: [pitr, private]
+    weights: { latency: 0.3, dr: 0.3, maturity: 0.2, cost: 0.2 }
+  C2:
+    defaults:
+      drProfile: bronze
+      pitr: false
+      private: true
+      ha: false
+    gates:
+      crossCloudSecondary: false
+      requiredMysql: [private]
+    weights: { latency: 0.25, dr: 0.2, maturity: 0.2, cost: 0.35 }
+
+drProfiles:
+  gold:
+    computeMode: warm
+    replicationMode: goldengate-cdc
+    trafficMode: dns-failover
+    rtoMinutes: 15
+    rpoSeconds: 30
+  silver:
+    computeMode: pilot
+    replicationMode: goldengate-cdc
+    trafficMode: dns-failover
+    rtoMinutes: 60
+    rpoSeconds: 120
+  bronze:
+    computeMode: cold
+    replicationMode: backup-restore
+    trafficMode: dns-failover
+    rtoMinutes: 240
+    rpoSeconds: 900

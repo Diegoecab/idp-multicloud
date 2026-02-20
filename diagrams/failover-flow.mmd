@@ -1,0 +1,13 @@
+sequenceDiagram
+  participant Ops as Operator/API
+  participant CP as Control Plane
+  participant GG as GoldenGate
+  participant Argo as Argo CD
+  participant DNS as Traffic Provider
+  Ops->>CP: POST /api/failover(cell, env)
+  CP->>GG: Check replication lag <= target RPO
+  GG-->>CP: Lag OK
+  CP->>Argo: Activate secondary (scale up)
+  CP->>DNS: switch(to_secondary)
+  CP->>CP: Enable write fence / read-only on primary
+  CP-->>Ops: Failover completed + audit event

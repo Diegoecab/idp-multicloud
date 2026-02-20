@@ -1,0 +1,14 @@
+flowchart LR
+  Dev[Portal] --> CP[Control Plane API]
+  CP --> SCH[Scheduler]
+  SCH --> PD[(PlacementDecision)]
+  CP --> XP[Crossplane]
+  XP --> DBP[(Primary MySQL)]
+  XP --> DBS[(Secondary MySQL)]
+  CP --> GG[OCI GoldenGate]
+  GG -->|CDC| DBS
+  CP --> ARGO[Argo CD]
+  ARGO --> CL1[Primary Runtime Cluster]
+  ARGO --> CL2[Secondary Runtime Cluster]
+  CP --> DNS[OCI DNS / Traffic Provider]
+  DNS --> USERS[Client Traffic]

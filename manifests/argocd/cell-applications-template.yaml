@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-primary-payments-prod
+spec:
+  destination:
+    name: eks-prod-use1
+    namespace: workloads
+  source:
+    repoURL: https://github.com/example/gitops-apps
+    path: apps/payments
+    targetRevision: main
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: app-secondary-payments-prod
+spec:
+  destination:
+    name: gke-prod-usc1
+    namespace: workloads
+  source:
+    repoURL: https://github.com/example/gitops-apps
+    path: apps/payments-dr
+    targetRevision: main
