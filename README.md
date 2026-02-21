@@ -666,16 +666,19 @@ idp-multicloud/
 │   │   ├── registry.py             # Product registry: ProductDefinition, validation, claim builder
 │   │   └── catalog.py              # Product catalog: MySQL, WebApp, PostgreSQL (add new products here)
 │   ├── k8s/
-│   │   ├── client.py               # Kubernetes dynamic client (SSA, CRUD, generic + MySQL)
+│   │   ├── client.py               # Kubernetes dynamic client (SSA, CRUD, generic + apply_secret/apply_manifest)
 │   │   └── claim_builder.py        # Crossplane MySQLInstanceClaim builder (legacy)
 │   ├── db/
-│   │   └── database.py             # SQLite persistent state store (config, placements, sagas, DR)
+│   │   └── database.py             # SQLite persistent state store (config, placements, sagas, DR, credentials)
 │   ├── orchestration/
 │   │   └── saga.py                 # Saga orchestrator with compensation/rollback
+│   ├── provisioning/
+│   │   └── crossplane.py           # Pushes IDP credentials → K8s Secrets + Crossplane ProviderConfigs
 │   └── handlers/
 │       ├── mysql.py                # MySQL-specific API (backward compatible)
 │       ├── services.py             # Generic multi-product API: /api/services/<product>
-│       └── admin.py                # Admin API: config, providers, DR, sagas, placements
+│       ├── admin.py                # Admin API: config, providers, DR, sagas, placements, crossplane
+│       └── cell_api.py             # Cell-scoped DR API: /api/cell/*
 ├── web/
 │   └── index.html                  # Frontend (vanilla HTML + JS) with admin section
 ├── tests/
@@ -690,6 +693,9 @@ idp-multicloud/
 │   ├── test_database.py            # SQLite state store tests
 │   ├── test_saga.py                # Saga orchestrator tests
 │   └── test_admin.py               # Admin API endpoint tests
+├── manifests/
+│   ├── controlplane-k8s.yaml       # Full Kubernetes deployment (namespace, PV, Deployment, Service, RBAC)
+│   └── crds/                       # Crossplane XRDs (MySQLInstance, etc.)
 ├── Dockerfile
 ├── requirements.txt
 └── README.md
@@ -739,11 +745,127 @@ Create a service instance for any registered product. Same scheduling pipeline f
 
 #### `GET /api/services/<product>/<namespace>/<name>`
 
-Query the status of an existing claim for any product.
+Query the live status of an existing service instance. The response includes real-time Crossplane claim conditions, connection endpoint, and placement details.
+
+```json
+{
+  "product": "mysql",
+  "name": "orders-db",
+  "namespace": "default",
+  "phase": "available",
+  "ready": true,
+  "endpoint": "orders-db-xyz.c87y2ma80gaf.us-east-1.rds.amazonaws.com",
+  "port": "3306",
+  "connectionSecret": {
+    "name": "orders-db-conn",
+    "namespace": "default",
+    "exists": true
+  },
+  "placement_record": {
+    "provider": "aws",
+    "region": "us-east-1",
+    "status": "READY",
+    "tier": "medium",
+    "ha": false
+  },
+  "saga": {
+    "state": "COMPLETED",
+    "current_step": "notify"
+  }
+}
+```
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `phase` | `creating`, `available`, `failed`, `unknown` | Derived from Crossplane `Ready` and `Synced` conditions |
+| `ready` | `true`, `false`, `null` | `true` when Crossplane confirms the resource is Ready |
+| `endpoint` | string | Database/service endpoint from the connection secret |
+| `port` | string | Port from the connection secret |
+
+The placement record status auto-transitions from `PROVISIONING` → `READY` when Crossplane confirms readiness.
 
 #### `POST /api/services/<product>/<namespace>/<name>/failover`
 
 Force rescheduling of an existing claim (override sticky placement) for any product.
+
+#### `POST /api/services/<product>/multicloud`
+
+Deploy a service to multiple cloud providers simultaneously (active-active DR).
+
+```bash
+curl -X POST http://localhost:8080/api/services/mysql/multicloud \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "orders-db",
+    "namespace": "default",
+    "cell": "cell-us-east",
+    "tier": "business_critical",
+    "environment": "production",
+    "size": "large",
+    "storageGB": 100,
+    "ha": true,
+    "target_providers": ["aws", "gcp"]
+  }'
+```
+
+### Admin Endpoints
+
+#### `POST /api/admin/crossplane/configure`
+
+Read cloud credentials from the IDP database and configure Crossplane providers. Creates:
+1. A `crossplane-system/<provider>-creds` Kubernetes Secret with provider credentials
+2. A Crossplane `Provider` package resource (installs the provider controller)
+3. A Crossplane `ProviderConfig` that points the provider at the credential Secret
+
+```bash
+curl -X POST http://localhost:8080/api/admin/crossplane/configure
+```
+
+Returns 200 on full success, 207 if some providers had errors.
+
+#### `GET /api/admin/credentials`
+
+List all provider credentials stored in the IDP database.
+
+#### `POST /api/admin/credentials`
+
+Store or update credentials for a cloud provider.
+
+```bash
+curl -X POST http://localhost:8080/api/admin/credentials \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "aws",
+    "cred_type": "access_key",
+    "cred_data": {
+      "aws_access_key_id": "AKIA...",
+      "aws_secret_access_key": "..."
+    }
+  }'
+```
+
+Supported `cred_type` values per provider:
+
+| Provider | `cred_type` | Required `cred_data` keys |
+|----------|-------------|--------------------------|
+| `aws` | `access_key` | `aws_access_key_id`, `aws_secret_access_key` |
+| `aws` | `irsa` | none (pod identity) |
+| `gcp` | `service_account` | full service account JSON fields |
+| `gcp` | `workload_identity` | none (pod identity) |
+| `oci` | `api_key` | `tenancy_ocid`, `user_ocid`, `fingerprint`, `private_key`, `region` |
+| `oci` | `instance_principal` | none (pod identity) |
+
+#### `GET /api/admin/sagas`
+
+List recent saga executions with state machine details.
+
+#### `GET /api/admin/placements`
+
+List all placement decisions from the database.
+
+#### `GET /api/admin/audit`
+
+List the audit log of all API actions.
 
 ### Legacy MySQL Endpoint
 
@@ -978,19 +1100,93 @@ The server starts on `http://localhost:8080`. The web UI is at `http://localhost
 
 All platform configuration (cloud providers, DR policies, saga settings), placement history, experiments, and feature flags are stored in a **SQLite database**. By default the file is `idp.db` in the working directory.
 
-To preserve all settings and history across code reloads or container restarts, set `IDP_DB_PATH` to a persistent location:
+To preserve all settings and history across restarts, set `IDP_DB_PATH` to a persistent location.
+
+#### Option 1: Linux / WSL Standalone
 
 ```bash
-# Linux / WSL — store in home directory
 export IDP_DB_PATH=~/idp-data/idp.db
 mkdir -p ~/idp-data
 python cmd/controlplane/main.py
+```
 
-# Docker — mount a volume for the database
-docker run -p 8080:8080 \
-  -v idp-data:/data \
-  -e IDP_DB_PATH=/data/idp.db \
-  idp-controlplane:latest
+Use the setup script for convenience:
+```bash
+bash scripts/setup-linux.sh
+```
+
+#### Option 2: Docker Compose
+
+```bash
+docker-compose up -d
+```
+
+This mounts a Docker volume (`idp-data`) for persistent storage and starts the control plane on port 8080.
+
+For a custom configuration, edit `docker-compose.yml` before running.
+
+#### Option 3: Kubernetes / Minikube
+
+Deploy to a Kubernetes cluster using PersistentVolume for data persistence.
+
+**Quick start with Minikube (automated):**
+
+```bash
+bash scripts/setup-minikube.sh
+```
+
+This script:
+1. Verifies Minikube is running
+2. Builds the Docker image locally
+3. Creates namespace, PersistentVolume, and Deployment
+4. Provides access instructions
+
+**Manual deployment:**
+
+Build and load the image into Minikube:
+```bash
+docker build -t idp-controlplane:latest .
+minikube image load idp-controlplane:latest
+```
+
+Apply the Kubernetes manifest (creates namespace, PV, Deployment, Service, RBAC):
+```bash
+kubectl apply -f manifests/controlplane-k8s.yaml
+```
+
+Wait for the pod to be ready:
+```bash
+kubectl wait --for=condition=ready pod \
+  -l app=idp-controlplane \
+  -n idp-system \
+  --timeout=120s
+```
+
+Access via NodePort service:
+```bash
+minikube service idp-controlplane -n idp-system
+# → opens http://<minikube-ip>:8080 in browser
+```
+
+Or use port-forward:
+```bash
+kubectl port-forward -n idp-system svc/idp-controlplane 8080:8080
+# → then open http://localhost:8080/web/
+```
+
+Check database in the PV:
+```bash
+# View the database file on the host
+ls -la /data/idp-db/
+
+# Or exec into the pod and query it
+kubectl exec -it -n idp-system deployment/idp-controlplane -- \
+  sqlite3 /data/idp.db '.tables'
+```
+
+**Clean up Kubernetes deployment:**
+```bash
+kubectl delete -f manifests/controlplane-k8s.yaml
 ```
 
 When starting, the control plane automatically:
@@ -1072,53 +1268,23 @@ minikube addons enable storage-provisioner
 #### Step 5: Build and deploy the control plane
 
 ```bash
-# Build the container image
+# Build directly into Minikube's Docker daemon (avoids image loading step)
+eval $(minikube docker-env)
 docker build -t idp-controlplane:latest .
 
-# Load into minikube (avoids needing a remote registry)
-minikube image load idp-controlplane:latest
-
-# Create deployment + service
-kubectl create deployment idp-controlplane --image=idp-controlplane:latest
-kubectl expose deployment idp-controlplane --port=8080
-
-# Force local image (don't pull from registry)
-kubectl patch deployment idp-controlplane \
-  -p '{"spec":{"template":{"spec":{"containers":[{"name":"idp-controlplane","imagePullPolicy":"IfNotPresent"}]}}}}'
-
-# Apply RBAC for Crossplane claims
-kubectl apply -f - <<EOF
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: idp-controlplane
-rules:
-  - apiGroups: ["db.platform.example.org"]
-    resources: ["mysqlinstanceclaims", "postgresqlinstanceclaims"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["compute.platform.example.org"]
-    resources: ["webappclaims"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: idp-controlplane
-subjects:
-  - kind: ServiceAccount
-    name: default
-    namespace: default
-roleRef:
-  kind: ClusterRole
-  name: idp-controlplane
-  apiGroup: rbac.authorization.k8s.io
-EOF
+# Apply the full manifest (namespace, PV, Deployment, Service, RBAC)
+kubectl apply -f manifests/controlplane-k8s.yaml
 
 # Wait for pod to be ready
-kubectl rollout status deployment/idp-controlplane --timeout=60s
+kubectl rollout status deployment/idp-controlplane -n idp-system --timeout=120s
+```
+
+**Rebuild after code changes:**
+```bash
+eval $(minikube docker-env)
+docker build -t idp-controlplane:latest .
+kubectl rollout restart deployment/idp-controlplane -n idp-system
+kubectl rollout status deployment/idp-controlplane -n idp-system --timeout=60s
 ```
 
 #### Step 6: Access the API
@@ -1439,60 +1605,91 @@ helm install crossplane crossplane-stable/crossplane \
 
 ### Step 2: Install Cloud Providers
 
+> **Crossplane v2**: Crossplane v2.x (installed above) uses **Pipeline mode** Compositions only. The legacy `spec.resources` field is not supported. All Compositions in this repo use `mode: Pipeline` with `function-patch-and-transform`.
+
+The IDP control plane manages provider packages automatically via `POST /api/admin/crossplane/configure` (see below), but you can also install them manually:
+
 ```bash
 kubectl apply -f - <<EOF
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata:
-  name: provider-aws-rds
+  name: upbound-provider-aws
 spec:
-  package: xpkg.upbound.io/upbound/provider-aws-rds:v1.5.0
+  package: xpkg.upbound.io/upbound/provider-aws:v0.33.0
+  packagePullPolicy: IfNotPresent
 ---
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata:
-  name: provider-gcp-sql
+  name: upbound-provider-gcp
 spec:
-  package: xpkg.upbound.io/upbound/provider-gcp-sql:v1.5.0
+  package: xpkg.upbound.io/upbound/provider-gcp:v0.33.0
+  packagePullPolicy: IfNotPresent
 ---
 apiVersion: pkg.crossplane.io/v1
 kind: Provider
 metadata:
-  name: provider-oci-mysql
+  name: upbound-provider-oci
 spec:
-  package: xpkg.upbound.io/upbound/provider-oci-mysql:v0.5.0
+  package: xpkg.upbound.io/upbound/provider-oci:v0.17.0
+  packagePullPolicy: IfNotPresent
 EOF
 
-# Wait for providers to become healthy
+# Wait for providers to become healthy (can take 2-5 min to download packages)
 kubectl get providers -w
 ```
 
-### Step 3: Configure Credentials
+### Step 3: Configure Credentials via IDP Admin API
 
-Create the Secrets and ProviderConfigs for each cloud provider (see [Cloud Provider Credentials](#cloud-provider-credentials) above).
+The IDP stores cloud credentials in its SQLite database and pushes them to Crossplane automatically.
+
+**Step 3a**: Add credentials via the Admin UI or API:
 
 ```bash
-# Example: create AWS credentials from a file
-kubectl -n crossplane-system create secret generic aws-credentials \
-  --from-file=credentials=./aws-credentials.ini
-
-# Apply the ProviderConfig
-kubectl apply -f - <<EOF
-apiVersion: aws.upbound.io/v1beta1
-kind: ProviderConfig
-metadata:
-  name: default
-spec:
-  credentials:
-    source: Secret
-    secretRef:
-      namespace: crossplane-system
-      name: aws-credentials
-      key: credentials
-EOF
+# Store AWS access key credentials in IDP
+curl -X POST http://localhost:8080/api/admin/credentials \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "aws",
+    "cred_type": "access_key",
+    "cred_data": {
+      "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",
+      "aws_secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    }
+  }'
 ```
 
-Repeat for GCP and OCI.
+**Step 3b**: Push credentials to Crossplane (creates K8s Secrets + ProviderConfigs):
+
+```bash
+curl -X POST http://localhost:8080/api/admin/crossplane/configure
+```
+
+This endpoint reads the IDP credential store, creates `crossplane-system/<provider>-creds` Secrets, installs provider packages, and applies ProviderConfigs. The response shows the status per provider:
+
+```json
+{
+  "results": [
+    {
+      "provider": "aws",
+      "status": "configured",
+      "auth": "access_key",
+      "secret": "crossplane-system/aws-creds",
+      "provider_config": "default"
+    },
+    {
+      "provider": "gcp",
+      "status": "skipped",
+      "reason": "no credentials configured"
+    }
+  ]
+}
+```
+
+> **Note**: If the provider package is still downloading, status will be `"pending"`. Re-call the endpoint once `kubectl get provider upbound-provider-aws` shows `HEALTHY: True`.
+
+For IRSA (AWS), Workload Identity (GCP), or Instance Principals (OCI), set `cred_type` to `"irsa"`, `"workload_identity"`, or `"instance_principal"` respectively (no `cred_data` keys needed — identity is injected at the pod level).
 
 ### Step 4: Create XRD (Composite + Claim)
 
@@ -1567,7 +1764,7 @@ kubectl apply -f function-patch-and-transform.yaml
 kubectl wait --for=condition=Healthy function/function-patch-and-transform --timeout=180s
 ```
 
-Each Composition maps a `MySQLInstanceClaim` to provider-specific managed resources:
+Each Composition maps a `MySQLInstanceClaim` to provider-specific managed resources using **Pipeline mode** (required by Crossplane v2):
 
 ```yaml
 # composition-mysql-aws.yaml
@@ -1581,66 +1778,62 @@ metadata:
 spec:
   compositeTypeRef:
     apiVersion: db.platform.example.org/v1alpha1
-    kind: MySQLInstanceClaim
-  resources:
-    - name: rds-instance
-      base:
-        apiVersion: rds.aws.upbound.io/v1beta1
-        kind: Instance
-        spec:
-          forProvider:
-            engine: mysql
-            engineVersion: "8.0"
-            instanceClass: db.t3.medium
-            allocatedStorage: 50
-            publiclyAccessible: false
-
----
-# composition-mysql-gcp.yaml
-apiVersion: apiextensions.crossplane.io/v1
-kind: Composition
-metadata:
-  name: mysql-gcp
-  labels:
-    db.platform.example.org/provider: gcp
-    db.platform.example.org/class: mysql
-spec:
-  compositeTypeRef:
-    apiVersion: db.platform.example.org/v1alpha1
-    kind: MySQLInstanceClaim
-  resources:
-    - name: cloudsql-instance
-      base:
-        apiVersion: sql.gcp.upbound.io/v1beta1
-        kind: DatabaseInstance
-        spec:
-          forProvider:
-            databaseVersion: MYSQL_8_0
-            settings:
-              - tier: db-f1-micro
-
----
-# composition-mysql-oci.yaml
-apiVersion: apiextensions.crossplane.io/v1
-kind: Composition
-metadata:
-  name: mysql-oci
-  labels:
-    db.platform.example.org/provider: oci
-    db.platform.example.org/class: mysql
-spec:
-  compositeTypeRef:
-    apiVersion: db.platform.example.org/v1alpha1
-    kind: MySQLInstanceClaim
-  resources:
-    - name: mds-instance
-      base:
-        apiVersion: mysql.oci.upbound.io/v1beta1
-        kind: MysqlDbSystem
-        spec:
-          forProvider:
-            shapeName: MySQL.VM.Standard.E3.1.8GB
+    kind: XMySQLInstance
+  mode: Pipeline
+  pipeline:
+  - step: patch-and-transform
+    functionRef:
+      name: function-patch-and-transform
+    input:
+      apiVersion: pt.fn.crossplane.io/v1beta1
+      kind: Resources
+      resources:
+      - name: rds-instance
+        base:
+          apiVersion: rds.aws.upbound.io/v1beta1
+          kind: Instance
+          spec:
+            forProvider:
+              engine: mysql
+              engineVersion: "8.0"
+              instanceClass: db.t3.micro
+              allocatedStorage: 20
+              username: admin
+              passwordSecretRef:
+                namespace: crossplane-system
+                name: mysql-admin-password
+                key: password
+              skipFinalSnapshot: true
+              publiclyAccessible: false
+              region: us-east-1
+        patches:
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.parameters.size
+          toFieldPath: spec.forProvider.instanceClass
+          transforms:
+          - type: map
+            map:
+              small: db.t3.micro
+              medium: db.t3.small
+              large: db.t3.medium
+              xlarge: db.m5.large
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.parameters.storageGB
+          toFieldPath: spec.forProvider.allocatedStorage
+        connectionDetails:
+        - name: endpoint
+          type: FromConnectionSecretKey
+          fromConnectionSecretKey: endpoint
+        - name: port
+          type: FromConnectionSecretKey
+          fromConnectionSecretKey: port
 ```
+
+> **Admin password secret**: Create this secret before applying any MySQL Composition:
+> ```bash
+> kubectl -n crossplane-system create secret generic mysql-admin-password \
+>   --from-literal=password="$(openssl rand -base64 24)"
+> ```
 
 The `compositionSelector.matchLabels` in the Claim (set automatically by the control plane) selects the correct Composition:
 - `db.platform.example.org/provider: aws` → `mysql-aws`
@@ -1665,22 +1858,25 @@ kubectl patch deployment idp-controlplane \
   -p '{"spec":{"template":{"spec":{"containers":[{"name":"idp-controlplane","imagePullPolicy":"IfNotPresent"}]}}}}'
 
 
-# The control plane needs RBAC to manage MySQLInstanceClaims
+# The control plane needs RBAC to manage claims, secrets, and Crossplane resources
 kubectl apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: idp-controlplane
 rules:
-  - apiGroups: ["db.platform.example.org"]
-    resources: ["mysqlinstanceclaims", "postgresqlinstanceclaims"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["compute.platform.example.org"]
-    resources: ["webappclaims"]
+  - apiGroups: ["db.platform.example.org", "compute.platform.example.org"]
+    resources: ["mysqlinstanceclaims", "postgresqlinstanceclaims", "webappclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["pkg.crossplane.io"]
+    resources: ["providers", "functions"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["aws.upbound.io", "gcp.upbound.io", "oci.upbound.io"]
+    resources: ["providerconfigs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -1688,8 +1884,8 @@ metadata:
   name: idp-controlplane
 subjects:
   - kind: ServiceAccount
-    name: default
-    namespace: default
+    name: idp-controlplane
+    namespace: idp-system
 roleRef:
   kind: ClusterRole
   name: idp-controlplane

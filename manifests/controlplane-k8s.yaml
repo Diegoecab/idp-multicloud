@@ -1,0 +1,194 @@
+---
+# Namespace for the control plane
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: idp-system
+
+---
+# PersistentVolume for SQLite database storage
+# On Minikube, this maps to a directory on the host
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: idp-db-pv
+  namespace: idp-system
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  # For Minikube: use hostPath (local host storage)
+  hostPath:
+    path: /data/idp-db
+    type: DirectoryOrCreate
+
+---
+# PersistentVolumeClaim - binds the database to the control plane
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: idp-db-pvc
+  namespace: idp-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 5Gi
+  volumeName: idp-db-pv
+
+---
+# IDP Control Plane Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idp-controlplane
+  namespace: idp-system
+  labels:
+    app: idp-controlplane
+    version: v1
+spec:
+  replicas: 1  # Single replica to avoid SQLite contention
+  selector:
+    matchLabels:
+      app: idp-controlplane
+  template:
+    metadata:
+      labels:
+        app: idp-controlplane
+    spec:
+      serviceAccountName: idp-controlplane
+      containers:
+      - name: controlplane
+        image: idp-controlplane:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: IDP_HOST
+          value: "0.0.0.0"
+        - name: IDP_PORT
+          value: "8080"
+        - name: IDP_DEBUG
+          value: "false"
+        - name: IDP_DB_PATH
+          value: "/data/idp.db"
+        
+        # Mount the persistent volume
+        volumeMounts:
+        - name: idp-db
+          mountPath: /data
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        
+        # Resource limits
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      
+      # Pod volumes
+      volumes:
+      - name: idp-db
+        persistentVolumeClaim:
+          claimName: idp-db-pvc
+
+---
+# Service to expose the control plane
+apiVersion: v1
+kind: Service
+metadata:
+  name: idp-controlplane
+  namespace: idp-system
+  labels:
+    app: idp-controlplane
+spec:
+  type: NodePort  # Allows access from outside cluster (ideal for Minikube)
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: idp-controlplane
+
+---
+# ServiceAccount for the control plane
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idp-controlplane
+  namespace: idp-system
+
+---
+# ClusterRole to allow the control plane to interact with Crossplane
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idp-controlplane
+rules:
+# Read and write claims (Crossplane compositions)
+- apiGroups:
+  - "db.platform.example.org"
+  - "compute.platform.example.org"
+  resources:
+  - mysqlinstanceclaims
+  - webappclaims
+  - postgresqlclaims
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+# Read connection secrets
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+
+---
+# ClusterRoleBinding binds the ServiceAccount to the role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: idp-controlplane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: idp-controlplane
+subjects:
+- kind: ServiceAccount
+  name: idp-controlplane
+  namespace: idp-system

@@ -309,6 +309,31 @@ def remove_credentials(provider: str):
     return jsonify({"error": f"No credentials for provider '{provider}'"}), 404
 
 
+# ── Crossplane Configuration ─────────────────────────────────────────────────
+
+@admin_bp.route("/api/admin/crossplane/configure", methods=["POST"])
+def configure_crossplane():
+    """Configure Crossplane providers using IDP credentials and cloud provider settings.
+
+    Reads every enabled provider from the Cloud Providers section and its
+    corresponding credentials from the Credentials section, then applies:
+      1. A Kubernetes Secret in crossplane-system with the raw credentials
+      2. A Crossplane Provider package resource (installs the provider controller)
+      3. A Crossplane ProviderConfig pointing at that Secret
+
+    Returns a per-provider result list describing what was applied or skipped.
+    """
+    from internal.provisioning.crossplane import configure_crossplane_providers
+    try:
+        results = configure_crossplane_providers()
+    except Exception as exc:
+        logger.error("Crossplane configuration failed: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+    any_error = any(r.get("status") == "error" for r in results)
+    return jsonify({"results": results}), 207 if any_error else 200
+
+
 @admin_bp.route("/api/admin/credentials/<provider>/validate", methods=["POST"])
 def validate_credentials(provider: str):
     """Validate provider credentials by running a lightweight check.

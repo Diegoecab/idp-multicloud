@@ -24,7 +24,7 @@ from internal.scheduler.scheduler import (
 from internal.k8s import client as k8s
 from internal.orchestration.saga import SagaOrchestrator, MultiCloudDeployer
 from internal.db.database import (
-    get_config, get_placement, record_placement,
+    get_config, get_placement, record_placement, update_placement_status,
     get_saga_by_resource, get_dr_policy,
     append_audit_log, provider_has_credentials,
 )
@@ -111,11 +111,38 @@ def create_service(product_name: str):
 
     # Execute via Saga orchestrator
     t0 = time.time()
+    logger.info(
+        "Starting provisioning saga for product=%s, name=%s, namespace=%s, cell=%s, tier=%s",
+        product_name,
+        body.get("name", ""),
+        body.get("namespace", "default"),
+        body.get("cell", ""),
+        body.get("tier", ""),
+    )
+    
     saga = SagaOrchestrator(product_name, body)
     result = saga.execute()
     duration_ms = (time.time() - t0) * 1000
 
     status_code = 422 if result.get("status") == "failed" else 201
+    
+    logger.info(
+        "Saga execution completed: saga_id=%s, product=%s, name=%s, "
+        "status=%s, duration_ms=%.0f, code=%d",
+        result.get("saga_id"),
+        product_name,
+        body.get("name", ""),
+        result.get("status"),
+        duration_ms,
+        status_code,
+    )
+    
+    if result.get("error"):
+        logger.error(
+            "Saga error for saga_id=%s: %s",
+            result.get("saga_id"),
+            result.get("error")[:200],
+        )
 
     # Audit log
     append_audit_log(
@@ -133,6 +160,7 @@ def create_service(product_name: str):
             "saga_id": result.get("saga_id"),
             "provider": result.get("placement", {}).get("provider"),
             "region": result.get("placement", {}).get("region"),
+            "applied": result.get("claim", {}).get("metadata", {}).get("name"),
         },
         provider=result.get("placement", {}).get("provider"),
         region=result.get("placement", {}).get("region"),
@@ -143,23 +171,62 @@ def create_service(product_name: str):
     return jsonify(result), status_code
 
 
+def _crossplane_claim_status(claim: dict) -> dict:
+    """Parse Crossplane status conditions from a claim.
+
+    Returns: ready (bool|None), synced (bool|None), phase (str), message (str).
+    """
+    conditions = claim.get("status", {}).get("conditions", [])
+    ready_cond = next((c for c in conditions if c.get("type") == "Ready"), None)
+    synced_cond = next((c for c in conditions if c.get("type") == "Synced"), None)
+
+    ready = ready_cond and ready_cond.get("status") == "True"
+    synced = synced_cond and synced_cond.get("status") == "True"
+
+    if ready:
+        phase = "available"
+    elif synced is False and synced_cond and "Error" in synced_cond.get("reason", ""):
+        phase = "failed"
+    elif ready is False or (synced and not ready):
+        phase = "creating"
+    else:
+        phase = "unknown"
+
+    msg = (ready_cond or {}).get("message", "") if not ready else ""
+    return {"ready": ready, "synced": synced, "phase": phase, "message": msg}
+
+
+def _read_connection_secret(namespace: str, secret_name: str) -> dict:
+    """Decode a Kubernetes Secret's data. Returns {} if absent or unavailable."""
+    from internal.k8s.client import _k8s_available, _api_client
+    if not _k8s_available or _api_client is None:
+        return {}
+    try:
+        import base64
+        from kubernetes import client as k8s_client
+        v1 = k8s_client.CoreV1Api(_api_client)
+        secret = v1.read_namespaced_secret(name=secret_name, namespace=namespace)
+        return {
+            k: base64.b64decode(v).decode("utf-8", errors="replace")
+            for k, v in (secret.data or {}).items()
+        }
+    except Exception:
+        return {}
+
+
 @services_bp.route("/api/services/<product_name>/<namespace>/<name>", methods=["GET"])
 def service_status(product_name: str, namespace: str, name: str):
-    """Return the claim status for any product, enriched with DB state."""
+    """Return live claim status enriched with Crossplane phase, endpoint, and DB state."""
     product = get_product(product_name)
     if product is None:
         return jsonify({"error": f"Unknown product: '{product_name}'"}), 404
 
-    # Get DB state (placement + saga)
     db_placement = get_placement(namespace, name)
     db_saga = get_saga_by_resource(namespace, name)
 
-    # Try K8s claim
     claim = None
     try:
-        claim = k8s.get_claim_generic(
-            product.api_version, product.kind, namespace, name,
-        )
+        claim = k8s.get_claim_generic(product.api_version, product.kind, namespace, name)
     except RuntimeError:
         pass
     except Exception as e:
@@ -171,6 +238,11 @@ def service_status(product_name: str, namespace: str, name: str):
             "message": f"{product.kind} '{namespace}/{name}' not found",
         }), 404
 
+    # ── Crossplane status ────────────────────────────────────────────────────
+    xp = _crossplane_claim_status(claim) if claim else {"phase": "unknown", "ready": None}
+    phase = xp["phase"]
+
+    # Connection secret (written by Crossplane when claim is ready)
     secret_name = f"{name}{product.connection_secret_suffix}"
     secret_exists = False
     try:
@@ -178,14 +250,35 @@ def service_status(product_name: str, namespace: str, name: str):
     except Exception:
         pass
 
+    conn = _read_connection_secret(namespace, secret_name) if secret_exists else {}
+    endpoint = conn.get("endpoint") or conn.get("host") or ""
+    port = conn.get("port", "")
+
+    # ── Sync placement record when Crossplane confirms ready ─────────────────
+    if db_placement and db_placement.get("status") == "PROVISIONING" and phase == "available":
+        try:
+            update_placement_status(db_placement["id"], "READY")
+            db_placement["status"] = "READY"
+            logger.info("Placement %s updated to READY (Crossplane available)", db_placement["id"])
+        except Exception as e:
+            logger.warning("Could not update placement status: %s", e)
+
     response = {
         "product": product_name,
+        "name": name,
+        "namespace": namespace,
+        "phase": phase,
+        "ready": xp.get("ready"),
+        "endpoint": endpoint,
+        "port": port,
         "connectionSecret": {
             "name": secret_name,
             "namespace": namespace,
             "exists": secret_exists,
         },
     }
+    if xp.get("message"):
+        response["status_message"] = xp["message"]
     if claim:
         response["claim"] = claim
     if db_placement:

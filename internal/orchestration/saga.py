@@ -125,24 +125,82 @@ class SagaOrchestrator:
     def _step_apply_claim(self):
         """Step 3: Build and apply the Crossplane claim."""
         self.claim = build_product_claim(self.product, self.body, self.placement)
+        
+        logger.info(
+            "Applying claim for %s/%s (product=%s, provider=%s, region=%s)",
+            self.claim["metadata"]["namespace"],
+            self.claim["metadata"]["name"],
+            self.product_name,
+            self.placement.provider,
+            self.placement.region,
+        )
+        logger.debug("Claim manifest: %s", self.claim)
+        
         try:
-            k8s.apply_claim_generic(
+            result = k8s.apply_claim_generic(
                 self.product.api_version, self.product.kind, self.claim,
             )
+            logger.info(
+                "Claim applied successfully: %s/%s (kind=%s, api_version=%s)",
+                self.claim["metadata"]["namespace"],
+                self.claim["metadata"]["name"],
+                self.product.kind,
+                self.product.api_version,
+            )
+            logger.debug("K8s apply result: %s", result)
             self.applied = True
-        except RuntimeError:
+        except RuntimeError as e:
             # K8s not available — standalone mode, claim built but not applied
+            logger.warning(
+                "Kubernetes not available, claim built but not applied: %s", e
+            )
             self.applied = False
         except Exception as e:
+            logger.error(
+                "Failed to apply claim %s/%s: %s",
+                self.claim["metadata"]["namespace"],
+                self.claim["metadata"]["name"],
+                e,
+            )
             cb = get_circuit_breaker(self.placement.provider)
             cb.record_failure()
             raise
 
     def _step_wait_ready(self):
-        """Step 4: Wait for claim to become ready (simplified: immediate pass)."""
-        # In production this would poll K8s for claim.status.conditions
-        # For now we mark it as ready immediately
-        pass
+        """Step 4: Wait for claim to become ready."""
+        if not self.applied:
+            logger.info("Skipping wait_ready: claim was not applied to cluster")
+            return
+        
+        namespace = self.claim["metadata"]["namespace"]
+        name = self.claim["metadata"]["name"]
+        
+        # Check claim status (simplified: single attempt with logging)
+        logger.info("Checking readiness of claim %s/%s", namespace, name)
+        
+        try:
+            claim = k8s.get_claim_generic(
+                self.product.api_version, self.product.kind, namespace, name
+            )
+            status = claim.get("status", {})
+            ready = status.get("ready", False)
+            
+            logger.info(
+                "Claim status for %s/%s: ready=%s, conditions=%s",
+                namespace, name, ready,
+                status.get("conditions", [])
+            )
+            
+            if not ready:
+                logger.warning(
+                    "Claim %s/%s is not ready yet. Status: %s",
+                    namespace, name, status
+                )
+        except Exception as e:
+            logger.warning(
+                "Could not fetch claim status for %s/%s: %s",
+                namespace, name, e
+            )
 
     def _step_register(self):
         """Step 5: Record placement in the database."""
@@ -159,7 +217,7 @@ class SagaOrchestrator:
             ha=self.svc_req.ha,
             total_score=self.placement.reason.get("selected", {}).get("total_score", 0),
             reason=self.placement.reason,
-            status="READY" if self.applied else "PROVISIONING",
+            status="PROVISIONING",
             failover=self.placement.failover,
             experiment=self.placement.reason.get("experiment"),
         )
@@ -167,12 +225,29 @@ class SagaOrchestrator:
 
     def _step_notify(self):
         """Step 6: Log completion."""
+        applied_status = "APPLIED" if self.applied else "NOT_APPLIED"
+        
         logger.info(
-            "Saga completed: %s/%s -> %s/%s (saga_id=%d, placement_id=%d)",
-            self.svc_req.namespace, self.svc_req.name,
-            self.placement.provider, self.placement.region,
-            self.saga_id, self.placement_id or 0,
+            "Saga completed: saga_id=%d, product=%s, namespace=%s, name=%s, "
+            "provider=%s, region=%s, applied=%s, placement_id=%d",
+            self.saga_id,
+            self.product_name,
+            self.svc_req.namespace,
+            self.svc_req.name,
+            self.placement.provider,
+            self.placement.region,
+            applied_status,
+            self.placement_id or 0,
         )
+        
+        if self.applied:
+            logger.info(
+                "Claim details: kind=%s, api_version=%s, "
+                "manifest_size_bytes=%d",
+                self.product.kind,
+                self.product.api_version,
+                len(str(self.claim)) if self.claim else 0,
+            )
 
     def _compensate(self):
         """Run compensation steps in reverse order."""

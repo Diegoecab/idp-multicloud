@@ -158,6 +158,22 @@ def build_product_claim(
             if value is not None:
                 params[spec.name] = value
 
+    # Build the spec with required fields and parameters
+    spec_dict = {
+        "provider": placement.provider,
+        "region": placement.region,
+        "parameters": params,
+        "compositionSelector": {
+            "matchLabels": {
+                f"{product.composition_group}/provider": placement.provider,
+                f"{product.composition_group}/class": product.composition_class,
+            },
+        },
+        "writeConnectionSecretToRef": {
+            "name": f"{name}{product.connection_secret_suffix}",
+        },
+    }
+
     return {
         "apiVersion": product.api_version,
         "kind": product.kind,
@@ -176,16 +192,5 @@ def build_product_claim(
                 ),
             },
         },
-        "spec": {
-            "parameters": params,
-            "compositionSelector": {
-                "matchLabels": {
-                    f"{product.composition_group}/provider": placement.provider,
-                    f"{product.composition_group}/class": product.composition_class,
-                },
-            },
-            "writeConnectionSecretToRef": {
-                "name": f"{name}{product.connection_secret_suffix}",
-            },
-        },
+        "spec": spec_dict,
     }

@@ -1,0 +1,132 @@
+---
+# MySQL Instance Claim CRD
+# Definición del custom resource para MySQL claims
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mysqlinstanceclaims.db.platform.example.org
+spec:
+  group: db.platform.example.org
+  scope: Namespaced
+  names:
+    kind: MySQLInstanceClaim
+    plural: mysqlinstanceclaims
+    singular: mysqlinstanceclaim
+    shortNames:
+    - mysql
+    - mysqlclaim
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            additionalProperties: true
+            properties:
+              engine:
+                type: string
+                default: "5.7"
+              storageGB:
+                type: integer
+                default: 20
+              cpu:
+                type: string
+                default: "2"
+              memory:
+                type: string
+                default: "2048"
+              provider:
+                type: string
+                description: "Cloud provider (aws, gcp, oci)"
+              region:
+                type: string
+                description: "Cloud region"
+              clusterName:
+                type: string
+                description: "Kubernetes cluster or RDS instance name"
+              ha:
+                type: boolean
+                default: false
+              tier:
+                type: string
+                default: "standard"
+              parameters:
+                type: object
+                additionalProperties: true
+              compositionSelector:
+                type: object
+                properties:
+                  matchLabels:
+                    type: object
+                    additionalProperties:
+                      type: string
+              writeConnectionSecretToRef:
+                type: object
+                properties:
+                  name:
+                    type: string
+            required:
+            - provider
+            - region
+          status:
+            type: object
+            properties:
+              ready:
+                type: boolean
+                default: false
+              endpoint:
+                type: string
+              port:
+                type: integer
+                default: 3306
+              secretName:
+                type: string
+                description: "Name of secret with connection details"
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    message:
+                      type: string
+
+---
+# AWS RDS MySQL Resource Class
+# Define how Crossplane should provision MySQL on AWS
+apiVersion: db.platform.example.org/v1alpha1
+kind: MySQLInstanceClaim
+metadata:
+  name: mysql-template
+  namespace: crossplane-system
+  annotations:
+    cert: "This is a template, not an actual resource"
+spec:
+  engine: "5.7"
+  storageGB: 20
+  cpu: "2"
+  memory: "2048"
+  provider: "aws"
+  region: "us-east-1"
+  clusterName: "provisioned-via-crossplane"
+  ha: false
+  tier: "standard"
+status:
+  ready: false
+  endpoint: "placeholder.rds.amazonaws.com"
+  port: 3306
+  secretName: "mysql-connection-secret"
+

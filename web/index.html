@@ -764,6 +764,108 @@
     // Create Service Form Submit (handled by multicloud-aware handler below)
 
     // ═══ STATUS PAGE ═══
+    function renderServiceStatus(containerId, data, isError) {
+      var container = document.getElementById(containerId);
+      if (isError) {
+        container.innerHTML = '<pre class="result status-err">' + JSON.stringify(data, null, 2) + '</pre>';
+        return;
+      }
+
+      var phase = data.phase || "unknown";
+      var phaseColors = { available: "#4ade80", creating: "#fbbf24", failed: "#f87171", unknown: "#94a3b8" };
+      var phaseColor = phaseColors[phase] || "#94a3b8";
+      var readyDot = data.ready === true ? "healthy" : (data.ready === false ? "unhealthy" : "");
+
+      var placement = data.placement_record || {};
+      var conn = data.connectionSecret || {};
+      var saga = data.saga || null;
+
+      var html = '<div style="margin-top:1rem;">';
+
+      // Status header card
+      html += '<div style="background:#0f172a;border:1px solid ' + phaseColor + ';border-radius:8px;padding:1rem 1.25rem;margin-bottom:1rem;display:flex;align-items:center;gap:1.5rem;">';
+      html += '<div style="text-align:center;min-width:90px;">';
+      html += '<div style="font-size:0.65rem;text-transform:uppercase;color:#64748b;letter-spacing:0.06em;margin-bottom:0.3rem;">Phase</div>';
+      html += '<div style="font-size:1rem;font-weight:700;color:' + phaseColor + ';text-transform:uppercase;">' + phase + '</div>';
+      html += '</div>';
+      html += '<div style="flex:1;display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:0.75rem;">';
+
+      function statusKV(label, value, mono) {
+        return '<div>' +
+          '<div style="font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">' + label + '</div>' +
+          '<div style="font-size:0.82rem;color:#e2e8f0;' + (mono ? 'font-family:monospace;word-break:break-all;' : '') + '">' + (value || '<span style="color:#475569;">—</span>') + '</div>' +
+          '</div>';
+      }
+
+      html += statusKV("Product", data.product);
+      html += statusKV("Namespace", data.namespace);
+      html += statusKV("Name", data.name);
+      html += statusKV("Ready", data.ready === true ? '<span class="health-dot healthy"></span>Yes' : (data.ready === false ? '<span class="health-dot unhealthy"></span>No' : '<span style="color:#64748b;">Unknown</span>'));
+
+      if (data.endpoint) {
+        html += statusKV("Endpoint", data.endpoint, true);
+      }
+      if (data.port) {
+        html += statusKV("Port", data.port);
+      }
+      if (data.status_message) {
+        html += statusKV("Message", '<span style="color:#fbbf24;">' + data.status_message + '</span>');
+      }
+
+      html += '</div></div>';
+
+      // Placement / infrastructure card
+      if (placement && Object.keys(placement).length > 0) {
+        var pStatus = placement.status || "";
+        var pStatusColor = pStatus === "READY" ? "#4ade80" : (pStatus === "FAILED" ? "#f87171" : "#fbbf24");
+        html += '<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:1rem 1.25rem;margin-bottom:1rem;">';
+        html += '<div style="font-size:0.75rem;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.75rem;">Placement</div>';
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:0.6rem;">';
+        html += statusKV("Provider", (placement.provider || "").toUpperCase());
+        html += statusKV("Region", placement.region);
+        html += statusKV("Cluster", placement.cluster);
+        html += statusKV("Tier", placement.tier);
+        html += statusKV("HA", placement.ha ? "Yes" : "No");
+        html += statusKV("DB Status", '<span style="color:' + pStatusColor + ';font-weight:600;">' + pStatus + '</span>');
+        html += '</div></div>';
+      }
+
+      // Connection secret card
+      if (conn && conn.name) {
+        html += '<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:1rem 1.25rem;margin-bottom:1rem;">';
+        html += '<div style="font-size:0.75rem;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.75rem;">Connection Secret</div>';
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:0.6rem;">';
+        html += statusKV("Secret Name", conn.name, true);
+        html += statusKV("Namespace", conn.namespace);
+        html += statusKV("Available", conn.exists ? '<span class="health-dot healthy"></span>Yes' : '<span class="health-dot unhealthy"></span>No (provisioning)');
+        html += '</div></div>';
+      }
+
+      // Saga card
+      if (saga) {
+        var sagaColor = saga.state === "COMPLETED" ? "#4ade80" : (saga.state === "FAILED" || saga.state === "ROLLED_BACK" ? "#f87171" : "#fbbf24");
+        html += '<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:1rem 1.25rem;margin-bottom:1rem;">';
+        html += '<div style="font-size:0.75rem;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.75rem;">Saga</div>';
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:0.6rem;">';
+        html += statusKV("Saga ID", saga.id, true);
+        html += statusKV("State", '<span style="color:' + sagaColor + ';font-weight:600;">' + saga.state + '</span>');
+        html += statusKV("Step", saga.current_step);
+        if (saga.error) {
+          html += statusKV("Error", '<span style="color:#f87171;">' + saga.error.slice(0, 120) + '</span>');
+        }
+        html += '</div></div>';
+      }
+
+      // Raw JSON (collapsible)
+      html += '<details style="margin-top:0.5rem;">';
+      html += '<summary style="font-size:0.75rem;color:#64748b;cursor:pointer;padding:0.3rem 0;">Raw API Response</summary>';
+      html += '<pre class="result status-ok" style="margin-top:0.5rem;">' + JSON.stringify(data, null, 2) + '</pre>';
+      html += '</details>';
+
+      html += '</div>';
+      container.innerHTML = html;
+    }
+
     document.getElementById("statusForm").addEventListener("submit", async function(e) {
       e.preventDefault();
       var btn = document.getElementById("statusBtn");
@@ -777,9 +879,9 @@
       try {
         var resp = await fetch(API + "/api/services/" + product + "/" + ns + "/" + name);
         var data = await resp.json();
-        renderJSON("statusResult", data, !resp.ok);
+        renderServiceStatus("statusResult", data, !resp.ok);
       } catch (err) {
-        renderJSON("statusResult", { error: err.message }, true);
+        renderServiceStatus("statusResult", { error: err.message }, true);
       } finally {
         btn.disabled = false;
         btn.textContent = "Query Status";

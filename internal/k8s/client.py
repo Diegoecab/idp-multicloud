@@ -209,6 +209,9 @@ def get_claim_generic(api_version: str, kind: str, namespace: str, name: str):
 
 def apply_claim_generic(api_version: str, kind: str, manifest: dict) -> dict:
     """Apply a claim of any product type using server-side apply (SSA)."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
     resource = _get_resource_for(api_version, kind)
     if resource is None:
         raise RuntimeError(
@@ -217,12 +220,28 @@ def apply_claim_generic(api_version: str, kind: str, manifest: dict) -> dict:
         )
 
     namespace = manifest["metadata"]["namespace"]
+    name = manifest["metadata"]["name"]
+    
+    logger.debug(
+        "Applying claim %s/%s (kind=%s, api_version=%s)",
+        namespace, name, kind, api_version
+    )
+    
     try:
         result = resource.server_side_apply(
             body=manifest, namespace=namespace, field_manager="idp-controlplane",
         )
-        return result.to_dict()
+        result_dict = result.to_dict()
+        
+        logger.info(
+            "Claim applied via SSA: %s/%s, result_kind=%s, has_status=%s",
+            namespace, name,
+            result_dict.get("kind"), "status" in result_dict
+        )
+        logger.debug("Apply result: %s", result_dict)
+        return result_dict
     except AttributeError:
+        logger.debug("SSA not available, falling back to replace/create")
         pass
 
     name = manifest["metadata"]["name"]
@@ -230,12 +249,28 @@ def apply_claim_generic(api_version: str, kind: str, manifest: dict) -> dict:
         existing = resource.get(name=name, namespace=namespace)
         manifest["metadata"]["resourceVersion"] = existing.metadata.resourceVersion
         result = resource.replace(body=manifest, namespace=namespace)
+        
+        logger.info(
+            "Claim replaced: %s/%s",
+            namespace, name
+        )
     except Exception as e:
         if hasattr(e, "status") and e.status == 404:
             result = resource.create(body=manifest, namespace=namespace)
+            logger.info(
+                "Claim created: %s/%s",
+                namespace, name
+            )
         else:
+            logger.error(
+                "Error applying claim %s/%s: %s",
+                namespace, name, e
+            )
             raise
-    return result.to_dict()
+    
+    result_dict = result.to_dict()
+    logger.debug("Apply result: %s", result_dict)
+    return result_dict
 
 
 def delete_claim_generic(api_version: str, kind: str, namespace: str, name: str):
@@ -266,3 +301,95 @@ def get_secret_exists(namespace: str, name: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def apply_secret(namespace: str, name: str, string_data: dict) -> dict:
+    """Create or update a Kubernetes Secret with the given string data.
+
+    Uses create with fallback to patch if the secret already exists.
+
+    Raises:
+        RuntimeError: If Kubernetes is not configured.
+    """
+    if not _k8s_available or _api_client is None:
+        raise RuntimeError(
+            "Kubernetes client is not available. Cannot apply Secret."
+        )
+
+    v1 = k8s_client.CoreV1Api(_api_client)
+    body = k8s_client.V1Secret(
+        api_version="v1",
+        kind="Secret",
+        metadata=k8s_client.V1ObjectMeta(name=name, namespace=namespace),
+        string_data=string_data,
+    )
+    try:
+        result = v1.create_namespaced_secret(namespace=namespace, body=body)
+        logger.info("Created Secret %s/%s", namespace, name)
+    except Exception as e:
+        if hasattr(e, "status") and e.status == 409:
+            result = v1.patch_namespaced_secret(name=name, namespace=namespace, body=body)
+            logger.info("Updated Secret %s/%s", namespace, name)
+        else:
+            raise
+    return result.to_dict()
+
+
+def apply_manifest(manifest: dict) -> dict:
+    """Apply any Kubernetes or Crossplane resource manifest via the dynamic client.
+
+    Uses server-side apply (SSA) so that partial updates are merged cleanly.
+    Falls back to create/replace if SSA is unavailable.
+
+    Raises:
+        RuntimeError: If Kubernetes is not configured or the CRD is missing.
+    """
+    if _dynamic_client is None:
+        raise RuntimeError(
+            "Kubernetes dynamic client is not available. Cannot apply manifest."
+        )
+
+    api_version = manifest.get("apiVersion", "")
+    kind = manifest.get("kind", "")
+    namespace = manifest.get("metadata", {}).get("namespace")
+    name = manifest.get("metadata", {}).get("name", "")
+
+    try:
+        resource = _dynamic_client.resources.get(api_version=api_version, kind=kind)
+    except Exception as e:
+        raise RuntimeError(
+            f"CRD for {kind} ({api_version}) not found in cluster: {e}"
+        )
+
+    try:
+        result = resource.server_side_apply(
+            body=manifest,
+            namespace=namespace,
+            field_manager="idp-controlplane",
+        )
+        logger.info("Applied %s %s via SSA", kind, name)
+        return result.to_dict()
+    except AttributeError:
+        pass  # older client — fall through to create/replace
+
+    try:
+        if namespace:
+            existing = resource.get(name=name, namespace=namespace)
+        else:
+            existing = resource.get(name=name)
+        manifest["metadata"]["resourceVersion"] = existing.metadata.resourceVersion
+        if namespace:
+            result = resource.replace(body=manifest, namespace=namespace)
+        else:
+            result = resource.replace(body=manifest)
+        logger.info("Replaced %s %s", kind, name)
+    except Exception as e:
+        if hasattr(e, "status") and e.status == 404:
+            if namespace:
+                result = resource.create(body=manifest, namespace=namespace)
+            else:
+                result = resource.create(body=manifest)
+            logger.info("Created %s %s", kind, name)
+        else:
+            raise
+    return result.to_dict()
